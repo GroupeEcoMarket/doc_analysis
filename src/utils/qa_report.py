@@ -7,12 +7,15 @@ import os
 import json
 import statistics
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from datetime import datetime
 import cv2
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from src.utils.qa_flags import load_qa_flags, QAFlags
+from src.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class QAReportGenerator:
@@ -29,26 +32,26 @@ class QAReportGenerator:
             max_workers: Nombre de threads pour le traitement parallèle
         """
         self.output_dir = output_dir
-        self.pages_data: List[Dict] = []
+        self.pages_data: List[Dict[str, Any]] = []
         self.max_workers = max_workers
         self._image_cache = {}  # Cache pour les images base64
     
-    def collect_data(self):
+    def collect_data(self) -> None:
         """Collecte les données QA de tous les fichiers traités"""
         output_path = Path(self.output_dir)
         
         if not output_path.exists():
-            print(f"⚠️  Répertoire non trouvé: {self.output_dir}")
+            logger.warning(f"Répertoire non trouvé: {self.output_dir}")
             return
         
         # Chercher tous les fichiers .qa.json
         qa_files = list(output_path.rglob("*.qa.json"))
         
         if not qa_files:
-            print(f"⚠️  Aucun fichier .qa.json trouvé dans {self.output_dir}")
+            logger.warning(f"Aucun fichier .qa.json trouvé dans {self.output_dir}")
             return
         
-        print(f"Trouve {len(qa_files)} fichier(s) .qa.json")
+        logger.info(f"Trouve {len(qa_files)} fichier(s) .qa.json")
         
         for qa_file in qa_files:
             # Correspondant image file
@@ -58,13 +61,13 @@ class QAReportGenerator:
                 image_file = qa_file.with_suffix('').with_suffix('.jpg')
             
             if not image_file.exists():
-                print(f"⚠️  Image non trouvée pour {qa_file.name}")
+                logger.warning(f"Image non trouvée pour {qa_file.name}")
                 continue
             
             # Charger les flags QA
             qa_flags = load_qa_flags(str(image_file))
             if qa_flags is None:
-                print(f"⚠️  Impossible de charger les flags QA pour {image_file.name}")
+                logger.warning(f"Impossible de charger les flags QA pour {image_file.name}")
                 continue
             
             # Charger les transformations pour obtenir le masque/contour et les chemins
@@ -91,7 +94,7 @@ class QAReportGenerator:
                             if transformed_from_json and os.path.exists(transformed_from_json):
                                 transformed_image_path = transformed_from_json
                 except Exception as e:
-                    print(f"⚠️  Erreur lors du chargement des transformations pour {image_file.name}: {e}")
+                    logger.warning(f"Erreur lors du chargement des transformations pour {image_file.name}", exc_info=True)
             
             # Fallback : chercher l'image originale si pas dans transform.json
             if not original_image_path or not os.path.exists(original_image_path):
@@ -140,7 +143,7 @@ class QAReportGenerator:
         
         return None
     
-    def generate_html_report(self, output_path: str = "qa_report.html"):
+    def generate_html_report(self, output_path: str = "qa_report.html") -> None:
         """
         Génère le rapport HTML
         
@@ -155,7 +158,7 @@ class QAReportGenerator:
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(html_content)
         
-        print(f"Rapport QA genere: {output_path}")
+        logger.info(f"Rapport QA genere: {output_path}")
     
     def _generate_html_content(self) -> str:
         """Génère le contenu HTML du rapport"""
@@ -891,7 +894,7 @@ class QAReportGenerator:
 """
         return html
     
-    def _calculate_statistics(self) -> Dict:
+    def _calculate_statistics(self) -> Dict[str, Any]:
         """Calcule les statistiques agrégées"""
         # Valeurs par défaut
         default_stats = {
@@ -992,7 +995,7 @@ class QAReportGenerator:
             'crops_applied': crops_applied
         }
     
-    def _get_time_distribution_warning(self, stats: Dict) -> str:
+    def _get_time_distribution_warning(self, stats: Dict[str, Any]) -> str:
         """Génère un avertissement si la moyenne est très différente de la médiane"""
         if stats['median_time'] > 0:
             diff = abs(stats['avg_time'] - stats['median_time'])
@@ -1133,7 +1136,7 @@ class QAReportGenerator:
         </table>
         """
     
-    def _process_gallery_item(self, page: Dict) -> str:
+    def _process_gallery_item(self, page: Dict[str, Any]) -> str:
         """Traite un élément de galerie (pour traitement parallèle)"""
         try:
             flags = page['qa_flags']
@@ -1306,8 +1309,8 @@ class QAReportGenerator:
         initial_batch_size = 10
         pages_to_process_initial = self.pages_data[:initial_batch_size]
         
-        print(f"Generation de la galerie initiale pour {len(pages_to_process_initial)} pages...")
-        print(f"   Total de pages: {len(self.pages_data)}")
+        logger.info(f"Generation de la galerie initiale pour {len(pages_to_process_initial)} pages...")
+        logger.info(f"   Total de pages: {len(self.pages_data)}")
         
         # Traitement parallèle des éléments de galerie initiaux
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
@@ -1320,13 +1323,13 @@ class QAReportGenerator:
                 try:
                     results[idx] = future.result()
                 except Exception as e:
-                    print(f"⚠️  Erreur lors du traitement de la page {idx}: {e}")
+                    logger.error(f"Erreur lors du traitement de la page {idx}", exc_info=True)
                     results[idx] = f'<div class="gallery-item"><p>Erreur</p></div>'
         
         gallery_items_initial = [r for r in results if r is not None]
         
         # Pré-générer TOUS les items de galerie (pour le lazy loading)
-        print(f"Pre-generation de tous les items de galerie ({len(self.pages_data)} pages)...")
+        logger.info(f"Pre-generation de tous les items de galerie ({len(self.pages_data)} pages)...")
         all_gallery_items_html = []
         
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
@@ -1339,7 +1342,7 @@ class QAReportGenerator:
                 try:
                     results_all[idx] = future.result()
                 except Exception as e:
-                    print(f"⚠️  Erreur lors du traitement de la page {idx}: {e}")
+                    logger.error(f"Erreur lors du traitement de la page {idx}", exc_info=True)
                     results_all[idx] = f'<div class="gallery-item"><p>Erreur: page {idx}</p></div>'
         
         all_gallery_items_html = [r if r is not None else '' for r in results_all]
@@ -1402,7 +1405,7 @@ class QAReportGenerator:
         except Exception:
             return None
     
-    def _generate_mask_image(self, page_data: Dict, max_size: int = 250) -> Optional[str]:
+    def _generate_mask_image(self, page_data: Dict[str, Any], max_size: int = 250) -> Optional[str]:
         """Génère une image de masque/contour à partir des transformations (optimisé)"""
         try:
             input_path = page_data.get('input_path')

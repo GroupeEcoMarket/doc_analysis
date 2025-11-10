@@ -5,10 +5,13 @@ Détecte les problèmes de qualité et génère des flags
 
 import cv2
 import numpy as np
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, asdict
 import json
 from src.utils.config_loader import get_config
+from src.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -37,7 +40,7 @@ class QAFlags:
     capture_type: str = 'UNKNOWN'  # 'SCAN', 'PHOTO', ou 'UNKNOWN'
     capture_white_percentage: float = 0.0  # Pourcentage de blanc détecté
     
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> Dict[str, Any]:
         """Convertit en dictionnaire"""
         result = asdict(self)
         # Convertir les valeurs None
@@ -48,7 +51,7 @@ class QAFlags:
         return result
     
     @classmethod
-    def from_dict(cls, data: Dict) -> 'QAFlags':
+    def from_dict(cls, data: Dict[str, Any]) -> 'QAFlags':
         """Crée depuis un dictionnaire"""
         return cls(**data)
 
@@ -85,7 +88,7 @@ class QADetector:
     def detect_flags(self, 
                      original_image: np.ndarray,
                      final_image: np.ndarray,
-                     metadata: Dict,
+                     metadata: Dict[str, Any],
                      processing_time: float = 0.0) -> QAFlags:
         """
         Détecte tous les flags de qualité
@@ -178,7 +181,7 @@ class QADetector:
     def _calculate_crop_margins(self, 
                                 original: np.ndarray,
                                 final: np.ndarray,
-                                crop_metadata: Dict) -> Dict[str, float]:
+                                crop_metadata: Dict[str, Any]) -> Dict[str, float]:
         """
         Calcule les marges de crop en pourcentage
         
@@ -253,7 +256,7 @@ def save_qa_flags(output_path: str, flags: QAFlags):
         with open(qa_file, 'w', encoding='utf-8') as f:
             json.dump(flags.to_dict(), f, indent=2, ensure_ascii=False)
     except Exception as e:
-        print(f"⚠️  Erreur lors de la sauvegarde des flags QA pour {output_path}: {e}")
+        logger.error(f"Erreur lors de la sauvegarde des flags QA pour {output_path}", exc_info=True)
 
 
 def load_qa_flags(output_path: str) -> Optional[QAFlags]:

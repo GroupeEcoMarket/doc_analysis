@@ -198,7 +198,7 @@ class Config:
         
         return value if value is not None else default
     
-    def reload(self):
+    def reload(self) -> None:
         """Recharge la configuration depuis le fichier"""
         self._config_data = self._load_config()
         self.geometry = self._load_geometry_config()
@@ -230,7 +230,7 @@ def get_config(config_path: Optional[str] = None) -> Config:
     return _global_config
 
 
-def reload_config():
+def reload_config() -> None:
     """Recharge la configuration globale"""
     global _global_config
     

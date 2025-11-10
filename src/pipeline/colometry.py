@@ -3,22 +3,24 @@ Colometry Normalization
 Normalise les documents par colométrie (analyse des colonnes)
 """
 
+from typing import Dict, List, Optional, Any
+
 
 class ColometryNormalizer:
     """
     Normalise les documents en analysant et standardisant la structure colométrique
     """
     
-    def __init__(self, config=None):
+    def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
         """
         Initialise le normaliseur colométrique
         
         Args:
             config: Configuration optionnelle
         """
-        self.config = config or {}
+        self.config: Dict[str, Any] = config or {}
     
-    def process(self, input_path, output_path):
+    def process(self, input_path: str, output_path: str) -> Dict[str, Any]:
         """
         Traite un document pour normaliser sa colométrie
         
@@ -32,7 +34,7 @@ class ColometryNormalizer:
         # TODO: Implémenter la normalisation colométrique
         pass
     
-    def process_batch(self, input_dir, output_dir):
+    def process_batch(self, input_dir: str, output_dir: str) -> List[Dict[str, Any]]:
         """
         Traite un lot de documents
         

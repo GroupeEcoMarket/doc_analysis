@@ -6,13 +6,16 @@ Génère un fichier meta.json global avec toutes les métadonnées
 import json
 import os
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Any
 from datetime import datetime
 from src.utils.qa_flags import load_qa_flags
 from src.utils.transform_handler import load_transforms
+from src.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
-def generate_meta_json(output_dir: str, meta_file: str = "meta.json"):
+def generate_meta_json(output_dir: str, meta_file: str = "meta.json") -> Dict[str, Any]:
     """
     Génère un fichier meta.json global avec toutes les métadonnées
     
@@ -66,11 +69,11 @@ def generate_meta_json(output_dir: str, meta_file: str = "meta.json"):
     with open(meta_file, 'w', encoding='utf-8') as f:
         json.dump(meta_data, f, indent=2, ensure_ascii=False)
     
-    print(f"Fichier meta.json genere: {meta_file}")
+    logger.info(f"Fichier meta.json genere: {meta_file}")
     return meta_data
 
 
-def _calculate_global_statistics(pages: List[Dict]) -> Dict:
+def _calculate_global_statistics(pages: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Calcule les statistiques globales"""
     if not pages:
         return {}

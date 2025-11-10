@@ -5,8 +5,11 @@ Permet de réappliquer les transformations sauvegardées
 
 import cv2
 import numpy as np
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 from src.utils.transform_handler import TransformSequence, load_transforms
+
+if TYPE_CHECKING:
+    from src.utils.transform_handler import Transform
 
 
 def apply_transform_sequence(image: np.ndarray, transform_sequence: TransformSequence) -> np.ndarray:
@@ -28,7 +31,7 @@ def apply_transform_sequence(image: np.ndarray, transform_sequence: TransformSeq
     return result
 
 
-def apply_single_transform(image: np.ndarray, transform) -> np.ndarray:
+def apply_single_transform(image: np.ndarray, transform: 'Transform') -> np.ndarray:  # type: ignore
     """
     Applique une transformation unique à une image
     

@@ -45,6 +45,11 @@ data/output/*
 !data/processed/.gitkeep
 !data/output/.gitkeep
 
+# Fichiers et répertoires générés par les tests et le coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
 # Logs
 *.log
 logs/

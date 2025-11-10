@@ -1,5 +1,6 @@
-# Configuration du Pipeline de Document Analysis
-# Tous les seuils et paramètres configurables
+# Document Analysis Pipeline Configuration
+# All configurable thresholds and parameters
+# This file serves as a dashboard for any engineer joining the project
 
 # ==========================================
 # GEOMETRY NORMALIZATION
@@ -7,95 +8,212 @@
 
 geometry:
   # Capture Type Classification (SCAN vs PHOTO)
+  # Automatically detects whether the input is a scanned document or a photo
   capture_classifier:
-    enabled: true  # Active/désactive la détection automatique
-    white_level_threshold: 245  # Valeur pixel (0-255) pour considérer comme blanc
-    white_percentage_threshold: 0.70  # % de blanc pour classer comme SCAN (70%)
-    skip_crop_if_scan: true  # Si SCAN détecté, sauter l'étape de crop doctr
+    enabled: true  # Enable/disable automatic capture type detection
+    # Pixel value threshold (0-255) to consider a pixel as white.
+    # Higher values (e.g., 250) are stricter and may misclassify slightly gray scans as photos.
+    # Lower values (e.g., 240) are more lenient and may classify photos with bright backgrounds as scans.
+    white_level_threshold: 245
+    # Percentage of white pixels required to classify as SCAN.
+    # Higher values (e.g., 0.80) require more white space, making classification stricter.
+    # Lower values (e.g., 0.60) are more lenient and may misclassify photos with lots of white space.
+    white_percentage_threshold: 0.70
+    # If SCAN is detected, skip the intelligent crop step (doctr).
+    # Scans typically don't need cropping, saving processing time.
+    skip_crop_if_scan: true
   
-  # Orientation (ONNX model)
+  # Orientation Detection (ONNX model)
+  # Detects and corrects document orientation (0°, 90°, 180°, 270°)
   orientation:
-    min_confidence: 0.70  # Confiance minimale pour accepter l'orientation détectée
+    # Minimum confidence threshold to accept the detected orientation.
+    # Higher values (e.g., 0.85) are stricter and may skip correction on ambiguous documents.
+    # Lower values (e.g., 0.60) are more lenient but may apply incorrect corrections.
+    min_confidence: 0.70
     
   # Intelligent Crop (doctr)
+  # Automatically crops the document from the background
   crop:
-    enabled: true  # Active/désactive le crop intelligent
-    min_area_ratio: 0.85  # Si le document occupe moins de 85% de l'image, recadrer
-    max_margin_ratio: 0.08  # Seuil pour overcrop_risk (> 8% d'un bord)
+    enabled: true  # Enable/disable intelligent cropping
+    # Minimum area ratio the document must occupy in the image to skip cropping.
+    # If the document occupies less than this ratio, cropping will be applied.
+    # Higher values (e.g., 0.90) are stricter and will crop more aggressively.
+    # Lower values (e.g., 0.75) are more lenient and may leave more background.
+    min_area_ratio: 0.85
+    # Maximum margin ratio threshold for overcrop_risk flag.
+    # If the detected crop margin exceeds this ratio (> 8% of an edge), a warning is raised.
+    # Lower values (e.g., 0.05) are stricter and flag more potential overcrops.
+    # Higher values (e.g., 0.12) are more lenient and may miss actual overcrop issues.
+    max_margin_ratio: 0.08
     
-  # Deskew
+  # Deskew (Angle Correction)
+  # Corrects document rotation/angle skew
   deskew:
     enabled: true
-    min_confidence: 0.20  # Ne pas deskewer si confiance < 20%
-    max_angle: 15.0  # Angle maximum acceptable (degrés)
-    min_angle: 0.5  # Angle minimum pour appliquer deskew (ignorer les petits angles)
-    hough_threshold: 100  # Seuil pour la détection de lignes Hough
+    # Confidence threshold for applying angle correction.
+    # Higher values (e.g., 0.5) make deskew stricter and avoid false positives on straight documents.
+    # Lower values (e.g., 0.10) are more lenient but may apply unnecessary corrections.
+    min_confidence: 0.20
+    # Maximum acceptable angle (in degrees) for correction.
+    # Angles beyond this threshold will not be corrected (may indicate a rotated scan).
+    # Lower values (e.g., 10.0) are stricter and only correct small angles.
+    # Higher values (e.g., 20.0) allow correction of more severe skews.
+    max_angle: 15.0
+    # Minimum angle threshold to apply deskew (ignore very small angles).
+    # Prevents unnecessary corrections for near-perfect documents.
+    # Higher values (e.g., 1.0) ignore more small angles, reducing processing.
+    # Lower values (e.g., 0.2) are more sensitive and may correct minimal skews.
+    min_angle: 0.5
+    # Threshold for Hough line detection algorithm.
+    # Increasing this value (e.g., 150) detects fewer lines, making angle detection more robust on clean documents.
+    # Decreasing it (e.g., 50) can help on documents with sparse text or few lines.
+    hough_threshold: 100
     
-  # Qualité d'image
+  # Image Quality Checks
+  # Validates and enforces minimum quality standards
   quality:
-    min_contrast: 50  # Contraste minimum après enhancement
-    min_resolution_width: 1200  # Largeur minimale de l'image finale
-    min_resolution_height: 1600  # Hauteur minimale de l'image finale
+    # Minimum contrast value after enhancement.
+    # Documents below this threshold will be flagged as low_contrast_after_enhance.
+    # Higher values (e.g., 70) are stricter and flag more low-contrast documents.
+    # Lower values (e.g., 40) are more lenient but may accept poor quality images.
+    min_contrast: 50
+    # Minimum width (in pixels) for the final processed image.
+    # Images below this width will be flagged as too_small_final.
+    # Higher values (e.g., 1500) enforce higher resolution requirements.
+    # Lower values (e.g., 1000) are more lenient but may accept low-resolution images.
+    min_resolution_width: 1200
+    # Minimum height (in pixels) for the final processed image.
+    # Images below this height will be flagged as too_small_final.
+    # Higher values (e.g., 2000) enforce higher resolution requirements.
+    # Lower values (e.g., 1400) are more lenient but may accept low-resolution images.
+    min_resolution_height: 1600
 
 # ==========================================
 # PDF PROCESSING
 # ==========================================
 
 pdf:
-  dpi: 300  # DPI pour la conversion PDF vers image
-  min_dpi: 300  # DPI minimum
+  # DPI (dots per inch) for PDF to image conversion.
+  # Higher values (e.g., 400) produce higher quality images but increase file size and processing time.
+  # Lower values (e.g., 200) are faster but may result in lower quality, especially for small text.
+  dpi: 300
+  # Minimum DPI threshold.
+  # PDFs with lower DPI will be flagged or upscaled.
+  # This ensures consistent quality across all processed documents.
+  min_dpi: 300
 
 # ==========================================
 # QA FLAGS
 # ==========================================
 
 qa:
+  # Quality Assurance thresholds for flagging potential issues
   flags:
-    low_confidence_orientation: 0.70  # Seuil pour flag low_confidence_orientation
-    overcrop_risk: 0.08  # Seuil pour flag overcrop_risk (% du bord)
-    low_contrast: 50  # Seuil pour flag low_contrast_after_enhance
-    too_small_width: 1200  # Seuil pour flag too_small_final (largeur)
-    too_small_height: 1600  # Seuil pour flag too_small_final (hauteur)
+    # Threshold for flagging low confidence orientation detection.
+    # If orientation confidence is below this value, the low_confidence_orientation flag is raised.
+    # Should match geometry.orientation.min_confidence for consistency.
+    low_confidence_orientation: 0.70
+    # Threshold for flagging potential overcrop risk (as percentage of edge).
+    # If crop margin exceeds this ratio, the overcrop_risk flag is raised.
+    # Should match geometry.crop.max_margin_ratio for consistency.
+    overcrop_risk: 0.08
+    # Threshold for flagging low contrast after enhancement.
+    # If contrast is below this value, the low_contrast_after_enhance flag is raised.
+    # Should match geometry.quality.min_contrast for consistency.
+    low_contrast: 50
+    # Threshold for flagging images that are too small (width).
+    # If final image width is below this value, the too_small_final flag is raised.
+    # Should match geometry.quality.min_resolution_width for consistency.
+    too_small_width: 1200
+    # Threshold for flagging images that are too small (height).
+    # If final image height is below this value, the too_small_final flag is raised.
+    # Should match geometry.quality.min_resolution_height for consistency.
+    too_small_height: 1600
 
 # ==========================================
 # COLOMETRY NORMALIZATION
 # ==========================================
 
 colometry:
-  enabled: false  # À implémenter
-  # Ajouter les paramètres de colometry ici
+  enabled: false  # Enable/disable column structure normalization
+  # Parameters to be defined: expected number of columns, column width thresholds, etc.
+  # Example: min_column_width: 50  # Minimum width (in pixels) for a column to be considered valid
 
 # ==========================================
 # FEATURE EXTRACTION
 # ==========================================
 
 features:
-  checkboxes:
-    enabled: false  # À implémenter
-    min_confidence: 0.60
-  
+  # OCR (Optical Character Recognition)
+  # Extracts text content from images
   ocr:
-    enabled: false  # À implémenter
+    enabled: false  # Enable/disable OCR text extraction
+    # Default language for Tesseract or other OCR engine.
+    # Common values: 'fra' (French), 'eng' (English), 'fra+eng' (multi-language).
+    # Using the correct language significantly improves recognition accuracy.
+    default_language: 'fra'
+    # Minimum confidence threshold for a recognized word/line to be accepted.
+    # Higher values (e.g., 0.85) are stricter and only accept high-confidence text, reducing false positives.
+    # Lower values (e.g., 0.60) are more lenient but may include incorrectly recognized text.
     min_confidence: 0.70
+  
+  # Checkbox Detection
+  # Detects and classifies checkboxes (checked/unchecked)
+  checkboxes:
+    enabled: false  # Enable/disable checkbox detection
+    # Confidence threshold for detecting a checkbox element.
+    # Higher values (e.g., 0.75) are stricter and only detect clear checkboxes, reducing false positives.
+    # Lower values (e.g., 0.50) are more lenient but may detect non-checkbox elements.
+    min_confidence: 0.60
+    # Threshold for considering a checkbox as "checked".
+    # Value between 0.0 and 1.0 representing the fill ratio or confidence of checked state.
+    # Higher values (e.g., 0.7) are stricter and only mark clearly checked boxes.
+    # Lower values (e.g., 0.3) are more lenient but may mark partially filled boxes as checked.
+    checked_threshold: 0.5
 
 # ==========================================
 # PERFORMANCE
 # ==========================================
 
 performance:
-  batch_size: 30  # Nombre de pages à traiter par batch
-  max_workers: 4  # Nombre de threads pour le traitement parallèle
-  lazy_load_models: true  # Charger les modèles uniquement quand nécessaire
+  # Number of pages to process per batch.
+  # Higher values (e.g., 50) improve throughput but increase memory usage.
+  # Lower values (e.g., 10) use less memory but may be slower for large documents.
+  batch_size: 30
+  # Number of worker threads for parallel processing.
+  # Higher values (e.g., 8) improve speed on multi-core systems but increase CPU usage.
+  # Lower values (e.g., 2) use less CPU but may be slower.
+  # Should not exceed the number of CPU cores.
+  max_workers: 4
+  # Load models only when needed (lazy loading).
+  # When true, models are loaded on first use, reducing initial startup time and memory usage.
+  # When false, all models are loaded at startup, increasing initial memory but ensuring models are ready.
+  lazy_load_models: true
 
 # ==========================================
 # OUTPUT
 # ==========================================
 
 output:
-  save_original: true  # Sauvegarder l'image originale
-  save_transformed: true  # Sauvegarder l'image transformée
-  save_qa_flags: true  # Sauvegarder les flags QA
-  save_transforms: true  # Sauvegarder les transformations appliquées
-  image_format: "png"  # Format d'image de sortie
-  jpeg_quality: 95  # Qualité JPEG si format = "jpg"
+  # Save the original input image before any transformations.
+  # Useful for debugging, comparison, or archival purposes.
+  save_original: true
+  # Save the transformed/processed image after all transformations.
+  # This is typically the final output used for downstream processing.
+  save_transformed: true
+  # Save quality assurance flags as metadata.
+  # Flags indicate potential issues (low contrast, overcrop risk, etc.) for review.
+  save_qa_flags: true
+  # Save the list of transformations applied to the document.
+  # Useful for audit trails, debugging, and understanding the processing pipeline.
+  save_transforms: true
+  # Output image format: "png" (lossless, larger files) or "jpg" (lossy, smaller files).
+  # PNG is recommended for documents with text and sharp edges.
+  # JPEG is suitable for photos but may introduce compression artifacts on text.
+  image_format: "png"
+  # JPEG quality (1-100) if image_format is "jpg".
+  # Higher values (e.g., 95) produce better quality but larger files.
+  # Lower values (e.g., 80) produce smaller files but may introduce visible compression artifacts.
+  # Only used when image_format is "jpg".
+  jpeg_quality: 95
 

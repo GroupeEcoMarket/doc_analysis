@@ -5,12 +5,16 @@ FastAPI application for document analysis
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .routes import router
+from .middleware import RequestIdMiddleware
 
 app = FastAPI(
     title="Document Analysis API",
     description="API pour l'analyse de documents avec pipeline ML",
     version="0.1.0"
 )
+
+# Request ID middleware (doit être ajouté en premier pour capturer toutes les requêtes)
+app.add_middleware(RequestIdMiddleware)
 
 # CORS middleware
 app.add_middleware(

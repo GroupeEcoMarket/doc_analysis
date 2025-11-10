@@ -6,9 +6,12 @@ Gère la sauvegarde et le chargement des transformations appliquées
 import json
 import os
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 import numpy as np
 from src.utils.file_handler import ensure_dir
+from src.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class Transform:
@@ -29,7 +32,7 @@ class Transform:
         self.params = params
         self.order = order
     
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> Dict[str, Any]:
         """Convertit la transformation en dictionnaire"""
         return {
             'transform_type': self.transform_type,
@@ -38,7 +41,7 @@ class Transform:
         }
     
     @classmethod
-    def from_dict(cls, data: Dict) -> 'Transform':
+    def from_dict(cls, data: Dict[str, Any]) -> 'Transform':
         """Crée une transformation depuis un dictionnaire"""
         return cls(
             transform_type=data['transform_type'],
@@ -66,13 +69,13 @@ class TransformSequence:
         self.output_original_path = output_original_path
         self.transforms: List[Transform] = []
     
-    def add_transform(self, transform: Transform):
+    def add_transform(self, transform: Transform) -> None:
         """Ajoute une transformation à la séquence"""
         self.transforms.append(transform)
         # Trier par ordre
         self.transforms.sort(key=lambda t: t.order)
     
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> Dict[str, Any]:
         """Convertit la séquence en dictionnaire"""
         # Créer un dictionnaire ordonné avec l'ordre souhaité
         result = {
@@ -87,7 +90,7 @@ class TransformSequence:
         return result
     
     @classmethod
-    def from_dict(cls, data: Dict) -> 'TransformSequence':
+    def from_dict(cls, data: Dict[str, Any]) -> 'TransformSequence':
         """Crée une séquence depuis un dictionnaire"""
         # Support de l'ancien format avec output_transformed_path et du nouveau format
         output_path = data.get('output_path', data.get('output_transformed_path', ''))
@@ -101,7 +104,7 @@ class TransformSequence:
             seq.add_transform(Transform.from_dict(t_data))
         return seq
     
-    def save(self, file_path: str):
+    def save(self, file_path: str) -> None:
         """Sauvegarde la séquence dans un fichier JSON"""
         with open(file_path, 'w', encoding='utf-8') as f:
             json.dump(self.to_dict(), f, indent=2, ensure_ascii=False)
@@ -128,7 +131,7 @@ def get_transform_file_path(output_path: str) -> str:
     return str(path.with_suffix('.transform.json'))
 
 
-def save_transforms(output_path: str, transform_sequence: TransformSequence):
+def save_transforms(output_path: str, transform_sequence: TransformSequence) -> None:
     """
     Sauvegarde les transformations dans un fichier JSON
     
@@ -142,7 +145,7 @@ def save_transforms(output_path: str, transform_sequence: TransformSequence):
         ensure_dir(os.path.dirname(transform_file))
         transform_sequence.save(transform_file)
     except Exception as e:
-        print(f"⚠️  Erreur lors de la sauvegarde des transformations pour {output_path}: {e}")
+        logger.error(f"Erreur lors de la sauvegarde des transformations pour {output_path}", exc_info=True)
 
 
 def load_transforms(output_path: str) -> Optional[TransformSequence]:

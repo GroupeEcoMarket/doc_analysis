@@ -7,19 +7,279 @@ import os
 import cv2
 import numpy as np
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 import time
-from onnxtr.models import from_hub
-from onnxtr.models.classification.zoo import page_orientation_predictor
+from dataclasses import dataclass
 from onnxtr.io import DocumentFile as OnnxTRDocumentFile
-from doctr.models import detection
 from src.utils.file_handler import ensure_dir, get_files, get_output_path
 from src.utils.transform_handler import (
     TransformSequence, Transform, save_transforms, get_transform_file_path
 )
 from src.utils.qa_flags import QADetector, QAFlags, save_qa_flags
-from src.utils.config_loader import get_config
-import time
+from src.utils.config_loader import get_config, GeometryConfig, QAConfig
+from src.utils.logger import get_logger
+from src.utils.exceptions import GeometryError, ModelLoadingError, ImageProcessingError
+from src.pipeline.models import GeometryOutput, CropMetadata, DeskewMetadata
+from typing import Optional
+
+logger = get_logger(__name__)
+
+
+@dataclass
+class OrientationResult:
+    """
+    Résultat standardisé de la détection d'orientation.
+    Cette classe encapsule la sortie du modèle d'orientation pour isoler
+    le reste du pipeline des changements internes de la librairie onnxtr.
+    """
+    angle: int  # Angle de rotation en degrés (0, 90, 180, 270)
+    confidence: float  # Confiance entre 0.0 et 1.0
+    
+    def __post_init__(self):
+        """Valide et normalise les valeurs après initialisation."""
+        # Normaliser l'angle à une valeur entre 0 et 360
+        self.angle = self.angle % 360
+        # Convertir en angle standard (0, 90, 180, 270)
+        if self.angle not in [0, 90, 180, 270]:
+            # Arrondir à l'angle le plus proche
+            self.angle = min([0, 90, 180, 270], key=lambda x: abs(x - self.angle))
+        # S'assurer que la confiance est dans [0, 1]
+        self.confidence = max(0.0, min(1.0, self.confidence))
+    
+    @property
+    def needs_rotation(self) -> bool:
+        """Indique si une rotation est nécessaire."""
+        return self.angle != 0
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convertit le résultat en dictionnaire pour compatibilité."""
+        return {
+            'angle': self.angle,
+            'needs_rotation': self.needs_rotation,
+            'confidence': self.confidence,
+            'status': 'success'
+        }
+
+
+class OrientationModelAdapter:
+    """
+    Adaptateur (Wrapper) autour du modèle d'orientation onnxtr.
+    
+    Le seul rôle de cet adaptateur est d'appeler le modèle et de toujours
+    retourner un objet OrientationResult standardisé. Le reste du pipeline
+    interagit uniquement avec cet objet standardisé, le rendant insensible
+    aux changements internes de la librairie onnxtr.
+    """
+    
+    def __init__(self, model: Any):
+        """
+        Initialise l'adaptateur avec le modèle onnxtr.
+        
+        Args:
+            model: Le modèle d'orientation onnxtr (page_orientation_predictor)
+        """
+        self.model = model
+    
+    def predict(self, image_path: str) -> OrientationResult:
+        """
+        Prédit l'orientation d'un document et retourne un résultat standardisé.
+        
+        Args:
+            image_path: Chemin vers l'image du document
+            
+        Returns:
+            OrientationResult: Résultat standardisé de la détection
+            
+        Raises:
+            GeometryError: Si la prédiction échoue ou si le format de sortie
+                          du modèle n'est pas reconnu
+        """
+        try:
+            # Charger l'image avec onnxtr
+            doc = OnnxTRDocumentFile.from_images([image_path])
+            
+            # Prédire l'orientation
+            orientation_result = self.model(doc)
+            
+            # Parser la sortie du modèle et extraire angle et confidence
+            angle, confidence = self._parse_model_output(orientation_result)
+            
+            # Retourner un résultat standardisé
+            return OrientationResult(angle=angle, confidence=confidence)
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de la prédiction d'orientation: {e}", exc_info=True)
+            raise GeometryError(f"Échec de la détection d'orientation: {e}") from e
+    
+    def _parse_model_output(self, orientation_result: Any) -> Tuple[int, float]:
+        """
+        Parse la sortie du modèle onnxtr et extrait l'angle et la confiance.
+        
+        Cette méthode centralise toute la logique de parsing fragile.
+        Si la librairie change sa sortie, seule cette méthode doit être modifiée.
+        
+        Args:
+            orientation_result: Sortie brute du modèle onnxtr
+            
+        Returns:
+            tuple: (angle, confidence) où angle est en degrés et confidence entre 0 et 1
+            
+        Raises:
+            GeometryError: Si le format de sortie n'est pas reconnu
+        """
+        angle = 0
+        confidence = 1.0
+        processed = False
+        
+        # Cas 1: Tuple/Liste de 3 éléments (class_indices, class_angles, confidences)
+        if isinstance(orientation_result, (list, tuple)):
+            if len(orientation_result) == 3 and all(isinstance(elem, (list, np.ndarray)) for elem in orientation_result):
+                try:
+                    class_indices, class_angles, confidences = orientation_result
+                    if len(class_angles) > 0:
+                        raw_angle = int(class_angles[0])
+                        raw_confidence = float(confidences[0]) if len(confidences) > 0 else 1.0
+                        angle = (raw_angle + 360) % 360
+                        allowed_angles = [0, 90, 180, 270]
+                        if angle not in allowed_angles:
+                            angle = min(allowed_angles, key=lambda x: abs(x - angle))
+                        confidence = max(0.0, min(1.0, raw_confidence))
+                        processed = True
+                except Exception as parse_error:
+                    logger.debug("Erreur parsing OrientationPredictor (format tuple 3 éléments)", exc_info=True)
+            
+            # Cas 2: Liste avec un premier élément (array numpy ou liste)
+            if not processed and len(orientation_result) > 0:
+                first_result = orientation_result[0]
+                angle, confidence, processed = self._parse_single_result(first_result)
+        
+        # Cas 3: Array numpy directement
+        if not processed and isinstance(orientation_result, np.ndarray):
+            angle, confidence, processed = self._parse_numpy_array(orientation_result)
+        
+        # Cas 4: Dictionnaire
+        if not processed and isinstance(orientation_result, dict):
+            angle = int(orientation_result.get('orientation', orientation_result.get('angle', 0)))
+            confidence = float(orientation_result.get('confidence', orientation_result.get('prob', 1.0)))
+            processed = True
+        
+        # Cas 5: Objet avec attributs
+        if not processed:
+            if hasattr(orientation_result, 'orientation'):
+                angle = int(orientation_result.orientation)
+                if hasattr(orientation_result, 'confidence'):
+                    confidence = float(orientation_result.confidence)
+                processed = True
+            elif hasattr(orientation_result, 'angle'):
+                angle = int(orientation_result.angle)
+                if hasattr(orientation_result, 'confidence'):
+                    confidence = float(orientation_result.confidence)
+                processed = True
+            elif hasattr(orientation_result, 'pages') and len(orientation_result.pages) > 0:
+                # Objet Document avec pages
+                first_page = orientation_result.pages[0]
+                if hasattr(first_page, 'orientation'):
+                    angle = int(first_page.orientation)
+                elif isinstance(first_page, dict):
+                    angle = int(first_page.get('orientation', first_page.get('angle', 0)))
+                    confidence = float(first_page.get('confidence', first_page.get('prob', 1.0)))
+                if hasattr(first_page, 'confidence'):
+                    confidence = float(first_page.confidence)
+                elif hasattr(first_page, 'prob'):
+                    confidence = float(first_page.prob)
+                processed = True
+        
+        # Cas 6: Nombre directement (angle)
+        if not processed and isinstance(orientation_result, (int, float)):
+            angle = int(orientation_result)
+            confidence = 1.0
+            processed = True
+        
+        if not processed:
+            raise GeometryError(
+                f"Format de sortie du modèle d'orientation non reconnu. "
+                f"Type reçu: {type(orientation_result)}, "
+                f"Valeur: {orientation_result}"
+            )
+        
+        return angle, confidence
+    
+    def _parse_single_result(self, result: Any) -> Tuple[int, float, bool]:
+        """
+        Parse un résultat unique (premier élément d'une liste).
+        
+        Returns:
+            tuple: (angle, confidence, processed) où processed indique si le parsing a réussi
+        """
+        # Array numpy
+        if isinstance(result, np.ndarray):
+            return self._parse_numpy_array(result)
+        
+        # Liste imbriquée
+        if isinstance(result, (list, tuple)):
+            try:
+                arr = np.array(result)
+                if isinstance(arr, np.ndarray):
+                    return self._parse_numpy_array(arr)
+            except Exception:
+                pass
+        
+        # Dictionnaire
+        if isinstance(result, dict):
+            angle = int(result.get('orientation', result.get('angle', 0)))
+            confidence = float(result.get('confidence', result.get('prob', 1.0)))
+            return angle, confidence, True
+        
+        # Objet avec attributs
+        if hasattr(result, 'orientation'):
+            angle = int(result.orientation)
+            confidence = float(result.confidence) if hasattr(result, 'confidence') else 1.0
+            return angle, confidence, True
+        
+        # Nombre
+        if isinstance(result, (int, float)):
+            return int(result), 1.0, True
+        
+        return 0, 1.0, False
+    
+    def _parse_numpy_array(self, arr: np.ndarray) -> Tuple[int, float, bool]:
+        """
+        Parse un array numpy contenant des probabilités ou logits.
+        
+        Returns:
+            tuple: (angle, confidence, processed) où processed indique si le parsing a réussi
+        """
+        if not isinstance(arr, np.ndarray):
+            return 0, 1.0, False
+        
+        # Normaliser les dimensions
+        if hasattr(arr, 'ndim') and arr.ndim == 2:
+            arr = arr[0]  # Prendre le premier élément du batch
+            if not isinstance(arr, np.ndarray):
+                arr = np.array(arr)
+        
+        # Vérifier que c'est un array 1D avec 4 valeurs (probabilités pour 0°, 90°, 180°, 270°)
+        if not isinstance(arr, np.ndarray) or not hasattr(arr, 'ndim') or arr.ndim != 1 or len(arr) != 4:
+            return 0, 1.0, False
+        
+        # Vérifier si ce sont des logits (valeurs non normalisées) ou des probabilités
+        if np.any(arr < 0) or np.any(arr > 1):
+            # Appliquer softmax pour convertir les logits en probabilités
+            exp_logits = np.exp(arr - np.max(arr))  # Pour stabilité numérique
+            probs = exp_logits / np.sum(exp_logits)
+        else:
+            # Ce sont déjà des probabilités, normaliser pour être sûr
+            probs = arr / np.sum(arr) if np.sum(arr) > 0 else arr
+        
+        # Trouver la classe avec la probabilité maximale
+        predicted_class = int(np.argmax(probs))
+        # Convertir l'index de classe en angle
+        angle_map = {0: 0, 1: 90, 2: 180, 3: 270}
+        angle = angle_map.get(predicted_class, 0)
+        # La confiance est la probabilité maximale
+        confidence = float(np.max(probs))
+        
+        return angle, confidence, True
 
 
 def fit_quad_to_pts(points: np.ndarray) -> np.ndarray:
@@ -74,108 +334,83 @@ class GeometryNormalizer:
     - doctr db_resnet50 pour la détection et le crop intelligent de pages
     """
     
-    def __init__(self, config=None):
+    def __init__(
+        self,
+        geo_config: Optional[GeometryConfig] = None,
+        qa_config: Optional[QAConfig] = None,
+        model_registry: Optional["ModelRegistry"] = None
+    ):
         """
-        Initialise le normaliseur géométrique
+        Initialise le normaliseur géométrique.
         
         Args:
-            config: Configuration optionnelle (dict ou None pour charger depuis config.yaml)
+            geo_config: Configuration géométrique (injectée via DI).
+                       Si None, charge la config depuis config.yaml (pour compatibilité).
+            qa_config: Configuration QA (injectée via DI).
+                      Si None, charge la config depuis config.yaml (pour compatibilité).
+            model_registry: Registre de modèles (injecté via DI).
+                          Si None, crée un registre par défaut (pour compatibilité).
         """
-        # Charger la configuration depuis config.yaml si non fournie
-        if config is None:
-            self.app_config = get_config()
-            self.geo_config = self.app_config.geometry
-            self.qa_config = self.app_config.qa
+        # Charger la configuration si non fournie (fallback pour compatibilité)
+        if geo_config is None or qa_config is None:
+            app_config = get_config()
+            self.geo_config = geo_config or app_config.geometry
+            self.qa_config = qa_config or app_config.qa
         else:
-            # Compatibilité avec l'ancien format dict
-            self.app_config = None
-            self.geo_config = None
-            self.qa_config = None
-            self.legacy_config = config
+            self.geo_config = geo_config
+            self.qa_config = qa_config
         
-        # Modèles (lazy loading)
-        self.orientation_model = None
-        self.detection_model = None
-        
-        # Charger les paramètres depuis la config
-        if self.geo_config:
-            # Nouvelle config (config.yaml)
-            self.crop_threshold = self.geo_config.crop_min_area_ratio
-            self.enable_crop = self.geo_config.crop_enabled
-            self.enable_deskew = self.geo_config.deskew_enabled
-            self.deskew_max_angle = self.geo_config.deskew_max_angle
-            self.deskew_min_angle = self.geo_config.deskew_min_angle
-            self.deskew_min_confidence = self.geo_config.deskew_min_confidence
-            self.deskew_hough_threshold = self.geo_config.deskew_hough_threshold
-            
-            # Capture classifier (pour décider si on skip le crop)
-            self.capture_classifier_skip_crop_if_scan = self.geo_config.capture_classifier_skip_crop_if_scan
+        # Registre de modèles (injection de dépendances)
+        if model_registry is None:
+            from src.models.registry import ModelRegistry
+            self.model_registry = ModelRegistry()
         else:
-            # Ancienne config (dict)
-            self.crop_threshold = self.legacy_config.get('crop_threshold', 0.85)
-            self.enable_crop = self.legacy_config.get('enable_crop', True)
-            self.enable_deskew = self.legacy_config.get('enable_deskew', True)
-            self.deskew_max_angle = self.legacy_config.get('deskew_max_angle', 15.0)
-            self.deskew_min_angle = self.legacy_config.get('deskew_min_angle', 0.5)
-            self.deskew_min_confidence = self.legacy_config.get('deskew_min_confidence', 0.20)
-            self.deskew_hough_threshold = self.legacy_config.get('deskew_hough_threshold', 100)
-            
-            # Capture classifier (désactivé par défaut en mode legacy)
-            self.capture_classifier_skip_crop_if_scan = self.legacy_config.get('capture_classifier_skip_crop_if_scan', True)
+            self.model_registry = model_registry
         
-        self._load_orientation_model()
-        self._load_detection_model()
+        # Charger les paramètres directement depuis la config
+        self.crop_threshold = self.geo_config.crop_min_area_ratio
+        self.enable_crop = self.geo_config.crop_enabled
+        self.enable_deskew = self.geo_config.deskew_enabled
+        self.deskew_max_angle = self.geo_config.deskew_max_angle
+        self.deskew_min_angle = self.geo_config.deskew_min_angle
+        self.deskew_min_confidence = self.geo_config.deskew_min_confidence
+        self.deskew_hough_threshold = self.geo_config.deskew_hough_threshold
+        
+        # Capture classifier (pour décider si on skip le crop)
+        self.capture_classifier_skip_crop_if_scan = self.geo_config.capture_classifier_skip_crop_if_scan
     
-    def _load_orientation_model(self):
+    def _get_orientation_adapter(self) -> OrientationModelAdapter:
         """
-        Charge le modèle de détection d'orientation depuis Hugging Face
+        Récupère l'adaptateur du modèle d'orientation via le registre.
+        
+        Returns:
+            OrientationModelAdapter: L'adaptateur qui encapsule le modèle onnxtr
         """
+        return self.model_registry.get_orientation_adapter()
+    
+    def _get_detection_model(self) -> Any:
+        """
+        Récupère le modèle de détection via le registre.
+        
+        Returns:
+            Modèle de détection doctr, ou None si le crop est désactivé
+        """
+        if not self.enable_crop:
+            return None
         try:
-            raw_model = from_hub('Felix92/onnxtr-mobilenet-v3-small-page-orientation')
-            self.orientation_model = page_orientation_predictor(arch=raw_model)
-        except Exception as e:
-            print(f"Warning: Impossible de charger le modèle d'orientation: {e}")
-            print("Le modèle sera chargé à la première utilisation")
+            return self.model_registry.get_detection_model()
+        except ModelLoadingError as e:
+            logger.warning(f"Impossible de charger le modèle de détection. Le crop intelligent sera désactivé: {e}")
+            self.enable_crop = False
+            return None
     
-    def _load_detection_model(self):
+    def detect_orientation(self, image_path: str) -> Dict[str, Any]:
         """
-        Charge le modèle de détection de pages doctr
-        """
-        if self.enable_crop:
-            try:
-                # Utiliser le predictor doctr qui gère le préprocessing
-                self.detection_model = detection.detection_predictor(arch="db_resnet50", pretrained=True)
-            except Exception as e:
-                print(f"Warning: Impossible de charger le modèle de détection doctr: {e}")
-                print("Le crop intelligent sera désactivé")
-                self.enable_crop = False
-    
-    def _get_orientation_model(self):
-        """
-        Récupère le modèle d'orientation (lazy loading)
-        """
-        if self.orientation_model is None:
-            try:
-                raw_model = from_hub('Felix92/onnxtr-mobilenet-v3-small-page-orientation')
-                self.orientation_model = page_orientation_predictor(arch=raw_model)
-            except Exception as e:
-                raise RuntimeError(f"Impossible de charger le modèle d'orientation: {e}")
-        return self.orientation_model
-    
-    def _get_detection_model(self):
-        """
-        Récupère le modèle de détection (lazy loading)
-        """
-        if self.detection_model is None and self.enable_crop:
-            try:
-                self.detection_model = detection.detection_predictor(arch="db_resnet50", pretrained=True)
-            except Exception as e:
-                raise RuntimeError(f"Impossible de charger le modèle de détection: {e}")
-        return self.detection_model
-    
-    def detect_orientation(self, image_path: str) -> Dict:
-        """
-        Détecte l'orientation d'un document en utilisant onnxtr-mobilenet-v3-small-page-orientation
+        Détecte l'orientation d'un document en utilisant onnxtr-mobilenet-v3-small-page-orientation.
+        
+        Cette méthode utilise l'adaptateur OrientationModelAdapter qui encapsule
+        toute la logique fragile de parsing de la sortie du modèle. Le reste du
+        pipeline interagit uniquement avec un objet OrientationResult standardisé.
         
         Args:
             image_path: Chemin vers l'image du document
@@ -184,242 +419,31 @@ class GeometryNormalizer:
             dict: Résultats de détection avec l'angle de rotation nécessaire
                 - angle: Angle de rotation en degrés (0, 90, 180, 270)
                 - needs_rotation: True si une rotation est nécessaire
+                - confidence: Confiance entre 0.0 et 1.0
                 - status: 'success' ou 'error'
         """
         try:
-            # Charger le modèle
-            model = self._get_orientation_model()
+            # Récupérer l'adaptateur (qui gère le lazy loading du modèle)
+            adapter = self._get_orientation_adapter()
             
-            # Charger l'image avec onnxtr
-            doc = OnnxTRDocumentFile.from_images([image_path])
+            # Utiliser l'adaptateur pour obtenir un résultat standardisé
+            result = adapter.predict(image_path)
             
-            # Prédire l'orientation
-            orientation_result = model(doc)
+            # Convertir le résultat en dictionnaire pour compatibilité
+            return result.to_dict()
             
-            # Le modèle peut retourner différentes structures :
-            # - Un array numpy avec des probabilités/logits pour chaque classe
-            # - Un dictionnaire avec 'orientation' et 'confidence'
-            # - Un objet avec des attributs
-            # - Une liste de résultats
-            
-            angle = 0
-            confidence = 1.0
-            
-            processed_orientation = False
-
-            if isinstance(orientation_result, (list, tuple)):
-                if len(orientation_result) == 3 and all(isinstance(elem, (list, np.ndarray)) for elem in orientation_result):
-                    try:
-                        class_indices, class_angles, confidences = orientation_result
-                        if len(class_angles) > 0:
-                            raw_angle = int(class_angles[0])
-                            raw_confidence = float(confidences[0]) if len(confidences) > 0 else 1.0
-                            angle = (raw_angle + 360) % 360
-                            allowed_angles = [0, 90, 180, 270]
-                            if angle not in allowed_angles:
-                                angle = min(allowed_angles, key=lambda x: abs(x - angle))
-                            confidence = max(0.0, min(1.0, raw_confidence))
-                            processed_orientation = True
-                            class_idx_display = class_indices[0] if len(class_indices) > 0 else "N/A"
-                    except Exception as parse_error:
-                        print(f"⚠️ Erreur parsing OrientationPredictor: {parse_error}")
-
-            if not processed_orientation:
-                # IMPORTANT: Traiter les listes EN PREMIER car elles peuvent contenir des arrays
-                # Si c'est une liste (doit être vérifié avant np.ndarray car une liste peut être convertie en array)
-                if isinstance(orientation_result, (list, tuple)) and len(orientation_result) > 0:
-                    first_result = orientation_result[0]
-                    
-                    # Si c'est un array numpy dans la liste
-                    if isinstance(first_result, np.ndarray):
-                        # Normaliser les dimensions
-                        if hasattr(first_result, 'ndim') and first_result.ndim == 2:
-                            first_result = first_result[0]
-                            # Vérifier que first_result est toujours un array après l'indexation
-                            if not isinstance(first_result, np.ndarray):
-                                # Si ce n'est pas un array, essayer de le convertir
-                                first_result = np.array(first_result)
-                        
-                        if isinstance(first_result, np.ndarray) and hasattr(first_result, 'ndim') and first_result.ndim == 1 and len(first_result) == 4:
-                            # Vérifier si ce sont des logits ou des probabilités
-                            if np.any(first_result < 0) or np.any(first_result > 1):
-                                # Appliquer softmax
-                                exp_logits = np.exp(first_result - np.max(first_result))
-                                probs = exp_logits / np.sum(exp_logits)
-                            else:
-                                probs = first_result / np.sum(first_result) if np.sum(first_result) > 0 else first_result
-                            
-                            predicted_class = int(np.argmax(probs))
-                            angle_map = {0: 0, 1: 90, 2: 180, 3: 270}
-                            angle = angle_map.get(predicted_class, 0)
-                            confidence = float(np.max(probs))
-                    # Si c'est une liste imbriquée (liste de listes)
-                    elif isinstance(first_result, (list, tuple)):
-                        # Convertir en array numpy
-                        try:
-                            arr = np.array(first_result)
-                            # Vérifier que c'est bien un array numpy et pas une liste
-                            if not isinstance(arr, np.ndarray):
-                                print(f"⚠️ Erreur: np.array() n'a pas créé un array numpy, type={type(arr)}")
-                                arr = None
-                            else:
-                                # Vérifier que arr a l'attribut ndim avant d'y accéder
-                                if not hasattr(arr, 'ndim'):
-                                    print(f"⚠️ Erreur: arr n'a pas l'attribut ndim, type={type(arr)}")
-                                    arr = None
-                        
-                            if arr is not None and isinstance(arr, np.ndarray) and arr.ndim == 1 and len(arr) == 4:
-                                # Vérifier si ce sont des logits ou des probabilités
-                                if np.any(arr < 0) or np.any(arr > 1):
-                                    # Appliquer softmax
-                                    exp_logits = np.exp(arr - np.max(arr))
-                                    probs = exp_logits / np.sum(exp_logits)
-                                else:
-                                    probs = arr / np.sum(arr) if np.sum(arr) > 0 else arr
-                                
-                                predicted_class = int(np.argmax(probs))
-                                angle_map = {0: 0, 1: 90, 2: 180, 3: 270}
-                                angle = angle_map.get(predicted_class, 0)
-                                confidence = float(np.max(probs))
-                            elif arr is not None and isinstance(arr, np.ndarray) and arr.ndim == 2 and len(arr) > 0:
-                                # Vérifier que arr[0] est accessible et a la bonne longueur
-                                try:
-                                    first_elem = arr[0]
-                                    if isinstance(first_elem, np.ndarray) and len(first_elem) == 4:
-                                        # Prendre le premier élément du batch
-                                        arr = first_elem
-                                    elif isinstance(first_elem, (list, tuple)) and len(first_elem) == 4:
-                                        # Convertir la liste en array
-                                        arr = np.array(first_elem)
-                                    else:
-                                        arr = None
-                                except:
-                                    arr = None
-                                
-                                if arr is not None and isinstance(arr, np.ndarray):
-                                    if np.any(arr < 0) or np.any(arr > 1):
-                                        exp_logits = np.exp(arr - np.max(arr))
-                                        probs = exp_logits / np.sum(exp_logits)
-                                    else:
-                                        probs = arr / np.sum(arr) if np.sum(arr) > 0 else arr
-                                    
-                                    predicted_class = int(np.argmax(probs))
-                                    angle_map = {0: 0, 1: 90, 2: 180, 3: 270}
-                                    angle = angle_map.get(predicted_class, 0)
-                                    confidence = float(np.max(probs))
-                        except Exception as e:
-                            print(f"⚠️ Erreur conversion liste en array: {e}")
-                    # Si c'est un dictionnaire
-                    elif isinstance(first_result, dict):
-                        angle = int(first_result.get('orientation', first_result.get('angle', 0)))
-                        confidence = float(first_result.get('confidence', first_result.get('prob', 1.0)))
-                    # Si c'est un objet
-                    elif hasattr(first_result, 'orientation'):
-                        angle = int(first_result.orientation)
-                        if hasattr(first_result, 'confidence'):
-                            confidence = float(first_result.confidence)
-                    # Si c'est directement un nombre
-                    elif isinstance(first_result, (int, float)):
-                        angle = int(first_result)
-                        confidence = 1.0
-                # Si c'est un array numpy (probabilités ou logits)
-                elif isinstance(orientation_result, np.ndarray):
-                    # Normaliser les dimensions
-                    if hasattr(orientation_result, 'ndim') and orientation_result.ndim == 2:
-                        orientation_result = orientation_result[0]  # Prendre le premier élément du batch
-                        # Vérifier que orientation_result est toujours un array après l'indexation
-                        if not isinstance(orientation_result, np.ndarray):
-                            # Si ce n'est pas un array, essayer de le convertir
-                            orientation_result = np.array(orientation_result)
-                    
-                    # Si c'est un array 1D avec 4 valeurs (probabilités pour 0°, 90°, 180°, 270°)
-                    if isinstance(orientation_result, np.ndarray) and hasattr(orientation_result, 'ndim') and orientation_result.ndim == 1 and len(orientation_result) == 4:
-                        # Vérifier si ce sont des logits (valeurs non normalisées) ou des probabilités
-                        # Si les valeurs sont négatives ou > 1, ce sont probablement des logits
-                        if np.any(orientation_result < 0) or np.any(orientation_result > 1):
-                            # Appliquer softmax pour convertir les logits en probabilités
-                            exp_logits = np.exp(orientation_result - np.max(orientation_result))  # Pour stabilité numérique
-                            probs = exp_logits / np.sum(exp_logits)
-                        else:
-                            # Ce sont déjà des probabilités, normaliser pour être sûr
-                            probs = orientation_result / np.sum(orientation_result) if np.sum(orientation_result) > 0 else orientation_result
-                        
-                        # Trouver la classe avec la probabilité maximale
-                        predicted_class = int(np.argmax(probs))
-                        # Convertir l'index de classe en angle
-                        angle_map = {0: 0, 1: 90, 2: 180, 3: 270}
-                        angle = angle_map.get(predicted_class, 0)
-                        # La confiance est la probabilité maximale
-                        confidence = float(np.max(probs))
-                # Si c'est un dictionnaire
-                elif isinstance(orientation_result, dict):
-                    angle = int(orientation_result.get('orientation', orientation_result.get('angle', 0)))
-                    confidence = float(orientation_result.get('confidence', orientation_result.get('prob', 1.0)))
-                # Si c'est un objet avec attributs
-                elif hasattr(orientation_result, 'orientation'):
-                    angle = int(orientation_result.orientation)
-                    if hasattr(orientation_result, 'confidence'):
-                        confidence = float(orientation_result.confidence)
-                elif hasattr(orientation_result, 'angle'):
-                    angle = int(orientation_result.angle)
-                    if hasattr(orientation_result, 'confidence'):
-                        confidence = float(orientation_result.confidence)
-                # Si c'est un objet Document (onnxtr peut retourner un objet avec des pages)
-                elif hasattr(orientation_result, 'pages') and len(orientation_result.pages) > 0:
-                    # Prendre la première page
-                    first_page = orientation_result.pages[0]
-                    if hasattr(first_page, 'orientation'):
-                        angle = int(first_page.orientation)
-                    elif isinstance(first_page, dict):
-                        angle = int(first_page.get('orientation', first_page.get('angle', 0)))
-                        confidence = float(first_page.get('confidence', first_page.get('prob', 1.0)))
-                    # Chercher dans les attributs de la page
-                    if hasattr(first_page, 'confidence'):
-                        confidence = float(first_page.confidence)
-                    elif hasattr(first_page, 'prob'):
-                        confidence = float(first_page.prob)
-                # Si c'est directement un nombre (angle)
-                elif isinstance(orientation_result, (int, float)):
-                    angle = int(orientation_result)
-                    confidence = 1.0  # Pas de confiance disponible
-                # Si aucun format reconnu, essayer d'accéder directement aux attributs
-                else:
-                    # Dernière tentative : chercher des attributs communs
-                    if hasattr(orientation_result, 'orientation'):
-                        angle = int(orientation_result.orientation)
-                    if hasattr(orientation_result, 'confidence'):
-                        confidence = float(orientation_result.confidence)
-                    elif hasattr(orientation_result, 'prob'):
-                        confidence = float(orientation_result.prob)
-                    elif hasattr(orientation_result, 'probability'):
-                        confidence = float(orientation_result.probability)
-            
-            # Normaliser l'angle à une valeur entre 0 et 360
-            angle = angle % 360
-            # Convertir en angle standard (0, 90, 180, 270)
-            if angle not in [0, 90, 180, 270]:
-                # Arrondir à l'angle le plus proche
-                angle = min([0, 90, 180, 270], key=lambda x: abs(x - angle))
-            
-            # S'assurer que la confiance est dans [0, 1]
-            confidence = max(0.0, min(1.0, confidence))
-            
-            return {
-                'angle': angle,
-                'needs_rotation': angle != 0,
-                'confidence': confidence,
-                'status': 'success'
-            }
         except Exception as e:
+            logger.error(f"Erreur lors de la détection d'orientation: {e}", exc_info=True)
             return {
                 'angle': 0,
                 'needs_rotation': False,
+                'confidence': 0.0,
                 'status': 'error',
                 'error': str(e)
             }
     
     
-    def intelligent_crop(self, image: np.ndarray, capture_type: Optional[str] = None) -> Tuple[np.ndarray, Dict]:
+    def intelligent_crop(self, image: np.ndarray, capture_type: Optional[str] = None) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
         Analyse une image, détecte le document et le découpe UNIQUEMENT
         si le document n'occupe pas déjà toute l'image.
@@ -692,12 +716,12 @@ class GeometryNormalizer:
         if len(angles) > 0:
             confidence = inliers / len(angles)
             # Pondérer légèrement par le nombre de lignes détectées (max 1.0)
-            confidence *= min(1.0, len(angles) / 20.0)
+            # confidence *= min(1.0, len(angles) / 20.0)
         
         confidence = float(np.clip(confidence, 0.0, 1.0))
         return float(median_angle), confidence
     
-    def deskew_image(self, image: np.ndarray, angle: float, confidence: float = 0.0) -> Tuple[np.ndarray, Dict]:
+    def deskew_image(self, image: np.ndarray, angle: float, confidence: float = 0.0) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
         Corrige l'inclinaison d'une image
         
@@ -774,7 +798,7 @@ class GeometryNormalizer:
             metadata['error'] = str(e)
             return image, metadata
     
-    def process(self, img: np.ndarray, output_path: str, capture_type: str, original_input_path: str, capture_info: Optional[Dict] = None) -> Dict:
+    def process(self, img: np.ndarray, output_path: str, capture_type: str, original_input_path: str, capture_info: Optional[Dict[str, Any]] = None) -> GeometryOutput:
         """
         Traite un document pour normaliser sa géométrie
         
@@ -826,10 +850,17 @@ class GeometryNormalizer:
                     ensure_dir(os.path.dirname(self._current_output_original_path))
                     cv2.imwrite(self._current_output_original_path, original_image)
                 except Exception as e:
-                    print(f"⚠️  Attention : Impossible de sauvegarder la copie de l'image source à {self._current_output_original_path}: {e}")
+                    logger.warning(f"Impossible de sauvegarder la copie de l'image source à {self._current_output_original_path}", exc_info=True)
 
-            # Initialiser le détecteur QA
-            qa_detector = QADetector()
+            # Initialiser le détecteur QA avec la config injectée
+            # Convertir QAConfig en dict pour QADetector (qui accepte un dict ou None)
+            qa_config_dict = {
+                'orientation_confidence_threshold': self.qa_config.low_confidence_orientation,
+                'overcrop_threshold': self.qa_config.overcrop_risk * 100,  # Convertir en %
+                'min_resolution': [self.qa_config.too_small_width, self.qa_config.too_small_height],
+                'contrast_threshold': float(self.qa_config.low_contrast)
+            }
+            qa_detector = QADetector(config=qa_config_dict)
             
             # Enregistrer la classification de capture si disponible
             if capture_info:
@@ -928,52 +959,8 @@ class GeometryNormalizer:
                     pass
             
             if orientation_result['status'] == 'error':
-                # En cas d'erreur d'orientation, sauvegarder l'image actuelle
-                cv2.imwrite(output_path, img)
-                
-                # Calculer le temps de traitement même en cas d'erreur
-                processing_time = time.time() - start_time
-                
-                # Détecter les flags QA même en cas d'erreur
-                metadata_for_qa = {
-                    'orientation_confidence': 0.0,  # Erreur = pas de confiance
-                    'crop_metadata': crop_metadata,
-                    'deskew_metadata': deskew_metadata,
-                    'rotation_applied': False,
-                    'angle': 0
-                }
-                
-                qa_flags = qa_detector.detect_flags(
-                    original_image=original_image,
-                    final_image=img,
-                    metadata=metadata_for_qa,
-                    processing_time=processing_time
-                )
-                
-                # Sauvegarder les flags QA même en cas d'erreur
-                save_qa_flags(output_path, qa_flags)
-                
-                # Sauvegarder les transformations partielles
-                save_transforms(output_path, transform_sequence)
-                
-                return {
-                    'input_path': original_input_path,  # Utiliser le chemin original
-                    'output_path': output_path,  # Chemin de l'image transformée (pour compatibilité)
-                    'output_transformed_path': output_path,  # Chemin de l'image transformée
-                    'transform_file': get_transform_file_path(output_path),
-                    'qa_file': str(Path(output_path).with_suffix('.qa.json')),
-                    'crop_applied': crop_metadata.get('crop_applied', False),
-                    'crop_metadata': crop_metadata,
-                    'deskew_applied': deskew_metadata.get('deskew_applied', False),
-                    'deskew_metadata': deskew_metadata,
-                    'orientation_detected': False,
-                    'rotation_applied': False,
-                    'qa_flags': qa_flags.to_dict(),
-                    'transforms': transform_sequence.to_dict(),
-                    'processing_time': processing_time,
-                    'error': orientation_result.get('error'),
-                    'status': 'error'
-                }
+                error_msg = orientation_result.get('error', 'Erreur inconnue lors de la détection d\'orientation')
+                raise GeometryError(f"Échec de la détection d'orientation: {error_msg}")
             
             # Étape 6: Rotation Finale (cv2.rotate)
             rotation_applied = False
@@ -1045,47 +1032,47 @@ class GeometryNormalizer:
             try:
                 save_qa_flags(output_path, qa_flags)
             except Exception as e:
-                import traceback
-                print(f"⚠️  Erreur lors de la sauvegarde des flags QA: {e}")
-                print(f"   Traceback: {traceback.format_exc()}")
+                logger.error("Erreur lors de la sauvegarde des flags QA", exc_info=True)
             
             # Sauvegarder la séquence de transformations
             try:
                 save_transforms(output_path, transform_sequence)
             except Exception as e:
-                import traceback
-                print(f"⚠️  Erreur lors de la sauvegarde des transformations: {e}")
-                print(f"   Traceback: {traceback.format_exc()}")
+                logger.error("Erreur lors de la sauvegarde des transformations", exc_info=True)
             
-            return {
-                'input_path': original_input_path,  # Utiliser le chemin original
-                'output_path': output_path,  # Chemin de l'image transformée (pour compatibilité)
-                'output_transformed_path': output_path,  # Chemin de l'image transformée
-                'transform_file': get_transform_file_path(output_path),
-                'qa_file': str(Path(output_path).with_suffix('.qa.json')),
-                'crop_applied': crop_metadata.get('crop_applied', False),
-                'crop_metadata': crop_metadata,
-                'deskew_applied': deskew_metadata.get('deskew_applied', False),
-                'deskew_angle': deskew_metadata.get('angle', 0.0),
-                'deskew_metadata': deskew_metadata,
-                'orientation_detected': True,
-                'angle': orientation_result.get('angle', 0),
-                'rotation_applied': rotation_applied,
-                'transforms': transform_sequence.to_dict(),
-                'qa_flags': qa_flags.to_dict(),
-                'processing_time': processing_time,
-                'status': 'success'
-            }
+            # Créer les modèles de métadonnées
+            crop_metadata_obj = CropMetadata(**crop_metadata)
+            deskew_metadata_obj = DeskewMetadata(**deskew_metadata)
+            
+            # Créer le modèle de sortie
+            return GeometryOutput(
+                status='success',
+                input_path=original_input_path,
+                output_path=output_path,  # Pour compatibilité
+                output_transformed_path=output_path,
+                output_original_path=output_original_path,
+                transform_file=get_transform_file_path(output_path),
+                qa_file=str(Path(output_path).with_suffix('.qa.json')),
+                crop_applied=crop_metadata.get('crop_applied', False),
+                crop_metadata=crop_metadata_obj,
+                deskew_applied=deskew_metadata.get('deskew_applied', False),
+                deskew_angle=deskew_metadata.get('angle', 0.0),
+                deskew_metadata=deskew_metadata_obj,
+                orientation_detected=True,
+                angle=orientation_result.get('angle', 0),
+                rotation_applied=rotation_applied,
+                transforms=transform_sequence.to_dict(),
+                qa_flags=qa_flags.to_dict(),
+                processing_time=processing_time
+            )
+        except GeometryError:
+            # Réexécuter les GeometryError telles quelles
+            raise
         except Exception as e:
-            return {
-                'input_path': original_input_path,
-                'output_path': output_path,  # Chemin de l'image transformée (pour compatibilité)
-                'output_transformed_path': output_path,  # Chemin de l'image transformée
-                'status': 'error',
-                'error': str(e)
-            }
+            # Convertir les autres exceptions en GeometryError
+            raise GeometryError(f"Erreur lors du traitement géométrique: {str(e)}") from e
     
-    def process_batch(self, input_dir: str, output_dir: str) -> List[Dict]:
+    def process_batch(self, input_dir: str, output_dir: str) -> List[Dict[str, Any]]:
         """
         Traite un lot de documents depuis le répertoire preprocessing
         
@@ -1111,7 +1098,7 @@ class GeometryNormalizer:
                 # Charger l'image prétraitée
                 img = cv2.imread(file_path)
                 if img is None:
-                    raise ValueError(f"Impossible de charger l'image: {file_path}")
+                    raise ImageProcessingError(f"Impossible de charger l'image: {file_path}")
                 
                 # Essayer de charger les métadonnées de preprocessing (si disponibles)
                 # Format attendu: fichier.json avec le même nom que l'image
@@ -1128,7 +1115,7 @@ class GeometryNormalizer:
                             capture_info = metadata.get('capture_info', {})
                             original_input_path = metadata.get('input_path', file_path)
                     except Exception as e:
-                        print(f"⚠️  Impossible de charger les métadonnées de {metadata_path}: {e}")
+                        logger.warning(f"Impossible de charger les métadonnées de {metadata_path}", exc_info=True)
                 
                 # Générer les chemins de sortie
                 base_output = get_output_path(file_path, output_dir)
@@ -1150,32 +1137,29 @@ class GeometryNormalizer:
                     capture_info=capture_info
                 )
                 
-                # Ajouter les chemins dans le résultat
-                result['output_original_path'] = output_original_path
-                result['output_transformed_path'] = output_transformed_path
-                results.append(result)
+                # Mettre à jour les chemins dans le résultat
+                result.output_original_path = output_original_path
+                result.output_transformed_path = output_transformed_path
+                
+                # Convertir en dict pour compatibilité avec process_batch
+                results.append(result.to_dict())
                 
                 # Vérifier que les fichiers ont été créés
                 qa_file = Path(output_transformed_path).with_suffix('.qa.json')
                 transform_file = Path(output_transformed_path).with_suffix('.transform.json')
                 if not qa_file.exists():
-                    print(f"⚠️  Fichier QA non créé pour {file_path}: {qa_file}")
+                    logger.warning(f"Fichier QA non créé pour {file_path}: {qa_file}")
                 if not transform_file.exists():
-                    print(f"⚠️  Fichier transformation non créé pour {file_path}: {transform_file}")
+                    logger.warning(f"Fichier transformation non créé pour {file_path}: {transform_file}")
                     
             except Exception as e:
-                print(f"❌ Erreur lors du traitement de {file_path}: {e}")
-                # Générer les chemins même en cas d'erreur
-                base_output = get_output_path(file_path, output_dir)
-                path_obj = Path(base_output)
-                output_original_path = str(path_obj.with_stem(f"{path_obj.stem}_original"))
-                output_transformed_path = str(path_obj.with_stem(f"{path_obj.stem}_transformed"))
-                
+                logger.error(f"Erreur lors du traitement de {file_path}", exc_info=True)
+                # Convertir en GeometryError pour uniformiser
+                if not isinstance(e, GeometryError):
+                    e = GeometryError(f"Erreur lors du traitement de {file_path}: {str(e)}")
+                # Pour process_batch, on continue avec les autres fichiers mais on enregistre l'erreur
                 results.append({
                     'input_path': file_path,
-                    'output_path': output_transformed_path,  # Pour compatibilité
-                    'output_original_path': output_original_path,
-                    'output_transformed_path': output_transformed_path,
                     'status': 'error',
                     'error': str(e)
                 })

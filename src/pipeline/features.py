@@ -3,6 +3,8 @@ Feature Extraction
 Extrait les features des documents (checkboxes, OCR, etc.)
 """
 
+from typing import Dict, List, Optional, Any
+
 
 class FeatureExtractor:
     """
@@ -12,16 +14,16 @@ class FeatureExtractor:
     - Autres features à définir
     """
     
-    def __init__(self, config=None):
+    def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
         """
         Initialise l'extracteur de features
         
         Args:
             config: Configuration optionnelle
         """
-        self.config = config or {}
+        self.config: Dict[str, Any] = config or {}
     
-    def process(self, input_path, output_path):
+    def process(self, input_path: str, output_path: str) -> Dict[str, Any]:
         """
         Traite un document pour extraire ses features
         
@@ -35,7 +37,7 @@ class FeatureExtractor:
         # TODO: Implémenter l'extraction de features
         pass
     
-    def process_batch(self, input_dir, output_dir):
+    def process_batch(self, input_dir: str, output_dir: str) -> List[Dict[str, Any]]:
         """
         Traite un lot de documents
         
@@ -49,7 +51,7 @@ class FeatureExtractor:
         # TODO: Implémenter le traitement par lot
         pass
     
-    def extract_checkboxes(self, image_path):
+    def extract_checkboxes(self, image_path: str) -> List[Dict[str, Any]]:
         """
         Détecte et extrait les checkboxes du document
         
@@ -62,7 +64,7 @@ class FeatureExtractor:
         # TODO: Implémenter la détection de checkboxes
         pass
     
-    def extract_ocr(self, image_path):
+    def extract_ocr(self, image_path: str) -> Dict[str, Any]:
         """
         Extrait le texte du document via OCR
         

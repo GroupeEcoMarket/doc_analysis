@@ -5,7 +5,7 @@ Détermine si une image provient d'un scan ou d'une photo
 
 import cv2
 import numpy as np
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 
 
 class CaptureClassifier:
@@ -32,7 +32,7 @@ class CaptureClassifier:
         self.white_percentage_threshold = white_percentage_threshold
         self.enabled = enabled
     
-    def classify(self, image: np.ndarray) -> Dict:
+    def classify(self, image: np.ndarray) -> Dict[str, Any]:
         """
         Classifie une image comme 'SCAN' ou 'PHOTO'
         
@@ -107,7 +107,7 @@ class CaptureClassifier:
                 'error': str(e)
             }
     
-    def classify_from_path(self, image_path: str) -> Dict:
+    def classify_from_path(self, image_path: str) -> Dict[str, Any]:
         """
         Classifie une image à partir de son chemin
         

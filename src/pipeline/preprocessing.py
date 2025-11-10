@@ -13,8 +13,14 @@ import time
 from src.utils.file_handler import ensure_dir, get_files, get_output_path
 from src.utils.pdf_handler import is_pdf, pdf_to_images
 from src.utils.capture_classifier import CaptureClassifier
-from src.utils.config_loader import get_config
+from src.utils.config_loader import get_config, GeometryConfig
 from src.utils.image_enhancer import enhance_contrast_clahe
+from src.utils.logger import get_logger
+from src.utils.exceptions import PreprocessingError, ImageProcessingError
+from src.pipeline.models import PreprocessingOutput, CaptureInfo, CaptureType
+from typing import Optional
+
+logger = get_logger(__name__)
 
 
 class PreprocessingNormalizer:
@@ -22,22 +28,28 @@ class PreprocessingNormalizer:
     Applique les prétraitements à une image avant les étapes géométriques.
     """
 
-    def __init__(self, config=None):
+    def __init__(self, capture_classifier: Optional[CaptureClassifier] = None):
         """
-        Initialise le normaliseur de prétraitement
+        Initialise le normaliseur de prétraitement.
         
         Args:
-            config: Configuration optionnelle (dict ou None pour charger depuis config.yaml)
+            capture_classifier: Classificateur de capture (injecté via DI).
+                              Si None, crée un classificateur avec la config par défaut
+                              (pour compatibilité avec l'ancien code).
         """
-        app_config = get_config()
-        geo_config = app_config.geometry
-        self.capture_classifier = CaptureClassifier(
-            white_level_threshold=geo_config.capture_classifier_white_level_threshold,
-            white_percentage_threshold=geo_config.capture_classifier_white_percentage_threshold,
-            enabled=geo_config.capture_classifier_enabled
-        )
+        if capture_classifier is None:
+            # Fallback pour compatibilité : charger la config si non fournie
+            app_config = get_config()
+            geo_config = app_config.geometry
+            self.capture_classifier = CaptureClassifier(
+                white_level_threshold=geo_config.capture_classifier_white_level_threshold,
+                white_percentage_threshold=geo_config.capture_classifier_white_percentage_threshold,
+                enabled=geo_config.capture_classifier_enabled
+            )
+        else:
+            self.capture_classifier = capture_classifier
 
-    def process(self, input_path: str, output_path: str) -> Dict:
+    def process(self, input_path: str, output_path: str) -> PreprocessingOutput:
         """
         Charge une image, améliore son contraste et classifie son type.
         Sauvegarde l'image prétraitée et retourne les métadonnées.
@@ -47,25 +59,26 @@ class PreprocessingNormalizer:
             output_path: Chemin de sortie pour l'image prétraitée
             
         Returns:
-            dict: Métadonnées du prétraitement avec capture_type, capture_info, etc.
+            PreprocessingOutput: Métadonnées structurées du prétraitement
         """
         start_time = time.time()
         
         if is_pdf(input_path):
             images = pdf_to_images(input_path, dpi=300)
             if not images:
-                raise ValueError(f"Aucune page trouvée dans le PDF: {input_path}")
+                raise PreprocessingError(f"Aucune page trouvée dans le PDF: {input_path}")
             img = images[0]
         else:
             img = cv2.imread(input_path)
             if img is None:
-                raise ValueError(f"Impossible de charger l'image: {input_path}")
+                raise ImageProcessingError(f"Impossible de charger l'image: {input_path}")
 
         # 1. Amélioration du contraste
         img_enhanced = enhance_contrast_clahe(img)
 
         # 2. Classification du type de capture
-        capture_info = self.capture_classifier.classify(img_enhanced)
+        capture_info_dict = self.capture_classifier.classify(img_enhanced)
+        capture_info = CaptureInfo(**capture_info_dict)
         
         # 3. Sauvegarde de l'image prétraitée
         ensure_dir(os.path.dirname(output_path))
@@ -73,28 +86,28 @@ class PreprocessingNormalizer:
         
         processing_time = time.time() - start_time
 
-        # 4. Sauvegarder les métadonnées dans un fichier JSON pour l'étape suivante
-        metadata = {
-            'status': 'success',
-            'input_path': input_path,
-            'processed_path': output_path,
-            'capture_type': capture_info['type'],
-            'capture_info': capture_info,
-            'processing_time': processing_time
-        }
+        # 4. Créer le modèle de sortie
+        output = PreprocessingOutput(
+            status='success',
+            input_path=input_path,
+            processed_path=output_path,
+            capture_type=capture_info.type,
+            capture_info=capture_info,
+            processing_time=processing_time
+        )
         
-        # Sauvegarder les métadonnées dans un fichier JSON
+        # 5. Sauvegarder les métadonnées dans un fichier JSON pour l'étape suivante
         metadata_path = Path(output_path).with_suffix('.json')
         try:
             with open(metadata_path, 'w') as f:
-                json.dump(metadata, f, indent=2)
+                json.dump(output.to_dict(), f, indent=2, default=str)
         except Exception as e:
-            print(f"⚠️  Impossible de sauvegarder les métadonnées: {e}")
+            logger.warning("Impossible de sauvegarder les métadonnées", exc_info=True)
 
-        # 5. Retourne les métadonnées pour l'étape suivante
-        return metadata
+        # 6. Retourne les métadonnées structurées pour l'étape suivante
+        return output
 
-    def process_batch(self, input_dir: str, output_dir: str) -> List[Dict]:
+    def process_batch(self, input_dir: str, output_dir: str) -> List[PreprocessingOutput]:
         """
         Traite un lot de documents.
         Pour les PDFs multi-pages, traite chaque page séparément.
@@ -115,7 +128,7 @@ class PreprocessingNormalizer:
                 # Traiter chaque page du PDF séparément
                 pdf_images = pdf_to_images(file_path, dpi=300)
                 if not pdf_images:
-                    print(f"⚠️  Aucune page trouvée dans le PDF: {file_path}")
+                    logger.warning(f"Aucune page trouvée dans le PDF: {file_path}")
                     continue
                 
                 # Générer le nom de base pour les fichiers de sortie
@@ -139,51 +152,76 @@ class PreprocessingNormalizer:
                         ensure_dir(page_output_path.parent)
                         cv2.imwrite(str(page_output_path), img_enhanced)
                         
-                        # 4. Sauvegarder les métadonnées dans un fichier JSON
-                        metadata = {
-                            'status': 'success',
-                            'input_path': file_path,
-                            'processed_path': str(page_output_path),
-                            'page_num': page_num + 1,
-                            'total_pages': len(pdf_images),
-                            'capture_type': capture_info['type'],
-                            'capture_info': capture_info,
-                            'processing_time': 0.0  # Temps de traitement par page (optionnel)
-                        }
+                        # 4. Créer le modèle de sortie
+                        capture_info_obj = CaptureInfo(**capture_info)
+                        output = PreprocessingOutput(
+                            status='success',
+                            input_path=file_path,
+                            processed_path=str(page_output_path),
+                            capture_type=capture_info_obj.type,
+                            capture_info=capture_info_obj,
+                            processing_time=0.0  # Temps de traitement par page (optionnel)
+                        )
                         
+                        # 5. Sauvegarder les métadonnées dans un fichier JSON
                         metadata_path = page_output_path.with_suffix('.json')
                         try:
+                            metadata_dict = output.to_dict()
+                            metadata_dict['page_num'] = page_num + 1
+                            metadata_dict['total_pages'] = len(pdf_images)
                             with open(metadata_path, 'w') as f:
-                                json.dump(metadata, f, indent=2)
+                                json.dump(metadata_dict, f, indent=2, default=str)
                         except Exception as e:
-                            print(f"⚠️  Impossible de sauvegarder les métadonnées pour la page {page_num + 1}: {e}")
+                            logger.warning(f"Impossible de sauvegarder les métadonnées pour la page {page_num + 1}", exc_info=True)
                         
-                        results.append(metadata)
-                        print(f"✓ Page {page_num + 1}/{len(pdf_images)} traitée: {page_output_path.name}")
+                        results.append(output)
+                        logger.info(f"Page {page_num + 1}/{len(pdf_images)} traitée: {page_output_path.name}")
                         
                     except Exception as e:
-                        print(f"❌ Erreur lors du traitement de la page {page_num + 1} de {file_path}: {e}")
-                        results.append({
-                            'status': 'error',
-                            'input_path': file_path,
-                            'page_num': page_num + 1,
-                            'total_pages': len(pdf_images),
-                            'error': str(e)
-                        })
+                        logger.error(f"Erreur lors du traitement de la page {page_num + 1} de {file_path}", exc_info=True)
+                        # Créer un PreprocessingOutput avec status='error'
+                        error_output = PreprocessingOutput(
+                            status='error',
+                            input_path=file_path,
+                            processed_path='',  # Pas de fichier traité en cas d'erreur
+                            capture_type=CaptureType.PHOTO,  # Valeur par défaut
+                            capture_info=CaptureInfo(
+                                type=CaptureType.PHOTO,
+                                white_percentage=0.0,
+                                confidence=0.0,
+                                enabled=False,
+                                reason='Error during processing'
+                            ),
+                            processing_time=0.0,
+                            error=str(e)
+                        )
+                        results.append(error_output)
             else:
                 # Traiter les images normales (une seule image)
                 output_path = get_output_path(file_path, output_dir).replace(Path(file_path).suffix, '.png')
                 try:
                     result = self.process(file_path, output_path)
                     results.append(result)
-                    print(f"✓ Image traitée: {Path(output_path).name}")
+                    logger.info(f"Image traitée: {Path(output_path).name}")
                 except Exception as e:
-                    print(f"❌ Erreur lors du traitement de {file_path}: {e}")
-                    results.append({
-                        'status': 'error',
-                        'input_path': file_path,
-                        'error': str(e)
-                    })
+                    logger.error(f"Erreur lors du traitement de {file_path}", exc_info=True)
+                    # Créer un PreprocessingOutput avec status='error'
+                    error_output = PreprocessingOutput(
+                        status='error',
+                        input_path=file_path,
+                        processed_path='',  # Pas de fichier traité en cas d'erreur
+                        capture_type=CaptureType.PHOTO,  # Valeur par défaut
+                        capture_info=CaptureInfo(
+                            type=CaptureType.PHOTO,
+                            white_percentage=0.0,
+                            confidence=0.0,
+                            enabled=False,
+                            reason='Error during processing'
+                        ),
+                        processing_time=0.0,
+                        error=str(e)
+                    )
+                    results.append(error_output)
         
         return results
 

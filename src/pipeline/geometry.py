@@ -196,47 +196,6 @@ class GeometryNormalizer:
             # Prédire l'orientation
             orientation_result = model(doc)
             
-            # Debug: afficher le type et la structure du résultat
-            print(f"[DEBUG ONNX] Type du résultat: {type(orientation_result)}")
-            if isinstance(orientation_result, np.ndarray):
-                print(f"[DEBUG ONNX] Shape: {orientation_result.shape}, dtype: {orientation_result.dtype}")
-                print(f"[DEBUG ONNX] Valeurs: {orientation_result}")
-            elif isinstance(orientation_result, (list, tuple)):
-                print(f"[DEBUG ONNX] Longueur: {len(orientation_result)}")
-                if len(orientation_result) > 0:
-                    print(f"[DEBUG ONNX] Premier élément type: {type(orientation_result[0])}")
-                    if isinstance(orientation_result[0], np.ndarray):
-                        if hasattr(orientation_result[0], 'shape'):
-                            print(f"[DEBUG ONNX] Premier élément shape: {orientation_result[0].shape}, valeurs: {orientation_result[0]}")
-                        else:
-                            print(f"[DEBUG ONNX] Premier élément (pas d'attribut shape): type={type(orientation_result[0])}, valeurs: {orientation_result[0]}")
-                    elif isinstance(orientation_result[0], (list, tuple)):
-                        print(f"[DEBUG ONNX] Premier élément est une liste/tuple de longueur: {len(orientation_result[0])}, valeurs: {orientation_result[0]}")
-                    else:
-                        # Essayer de convertir en array pour voir
-                        try:
-                            test_arr = np.array(orientation_result[0])
-                            if isinstance(test_arr, np.ndarray) and hasattr(test_arr, 'shape'):
-                                print(f"[DEBUG ONNX] Premier élément converti en array: shape={test_arr.shape}, valeurs={test_arr}")
-                            elif isinstance(test_arr, np.ndarray):
-                                print(f"[DEBUG ONNX] Premier élément converti en array (pas d'attribut shape): type={type(test_arr)}, valeurs={test_arr}")
-                            else:
-                                print(f"[DEBUG ONNX] Premier élément: {orientation_result[0]}")
-                        except Exception as e:
-                            print(f"[DEBUG ONNX] Erreur lors de la conversion: {e}, Premier élément: {orientation_result[0]}")
-            elif isinstance(orientation_result, dict):
-                print(f"[DEBUG ONNX] Clés: {list(orientation_result.keys())}")
-                for key, value in orientation_result.items():
-                    print(f"[DEBUG ONNX]   {key}: {type(value)} = {value}")
-            elif hasattr(orientation_result, '__dict__'):
-                print(f"[DEBUG ONNX] Objet avec attributs: {dir(orientation_result)}")
-                if hasattr(orientation_result, 'pages'):
-                    print(f"[DEBUG ONNX] Pages: {orientation_result.pages}")
-                if hasattr(orientation_result, 'orientation'):
-                    print(f"[DEBUG ONNX] Orientation: {orientation_result.orientation}")
-            else:
-                print(f"[DEBUG ONNX] Valeur brute: {orientation_result}")
-            
             # Le modèle peut retourner différentes structures :
             # - Un array numpy avec des probabilités/logits pour chaque classe
             # - Un dictionnaire avec 'orientation' et 'confidence'
@@ -865,6 +824,14 @@ class GeometryNormalizer:
             # Sauvegarder une copie de l'image originale pour QA
             original_image = img.copy()
             
+            if hasattr(self, '_current_output_original_path') and self._current_output_original_path:
+                try:
+                    # S'assurer que le répertoire de destination existe
+                    ensure_dir(os.path.dirname(self._current_output_original_path))
+                    cv2.imwrite(self._current_output_original_path, original_image)
+                except Exception as e:
+                    print(f"⚠️  Attention : Impossible de sauvegarder la copie de l'image source à {self._current_output_original_path}: {e}")
+
             # Initialiser le détecteur QA
             qa_detector = QADetector()
             
@@ -1139,17 +1106,14 @@ class GeometryNormalizer:
         """
         import json
         
-        print(f"[DEBUG BATCH] Début process_batch: input={input_dir}, output={output_dir}")
         ensure_dir(output_dir)
         
         # Obtenir la liste des fichiers images à traiter
         image_extensions = ['.png', '.jpg', '.jpeg']
         files = get_files(input_dir, extensions=image_extensions)
-        print(f"[DEBUG BATCH] Fichiers trouvés: {len(files)}")
         
         results = []
         for idx, file_path in enumerate(files):
-            print(f"[DEBUG BATCH] Traitement fichier {idx+1}/{len(files)}: {file_path}")
             
             try:
                 # Charger l'image prétraitée

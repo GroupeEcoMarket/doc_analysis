@@ -1,0 +1,101 @@
+# Configuration du Pipeline de Document Analysis
+# Tous les seuils et paramètres configurables
+
+# ==========================================
+# GEOMETRY NORMALIZATION
+# ==========================================
+
+geometry:
+  # Capture Type Classification (SCAN vs PHOTO)
+  capture_classifier:
+    enabled: true  # Active/désactive la détection automatique
+    white_level_threshold: 245  # Valeur pixel (0-255) pour considérer comme blanc
+    white_percentage_threshold: 0.70  # % de blanc pour classer comme SCAN (70%)
+    skip_crop_if_scan: true  # Si SCAN détecté, sauter l'étape de crop doctr
+  
+  # Orientation (ONNX model)
+  orientation:
+    min_confidence: 0.70  # Confiance minimale pour accepter l'orientation détectée
+    
+  # Intelligent Crop (doctr)
+  crop:
+    enabled: true  # Active/désactive le crop intelligent
+    min_area_ratio: 0.85  # Si le document occupe moins de 85% de l'image, recadrer
+    max_margin_ratio: 0.08  # Seuil pour overcrop_risk (> 8% d'un bord)
+    
+  # Deskew
+  deskew:
+    enabled: true
+    min_confidence: 0.20  # Ne pas deskewer si confiance < 20%
+    max_angle: 15.0  # Angle maximum acceptable (degrés)
+    min_angle: 0.5  # Angle minimum pour appliquer deskew (ignorer les petits angles)
+    hough_threshold: 100  # Seuil pour la détection de lignes Hough
+    
+  # Qualité d'image
+  quality:
+    min_contrast: 50  # Contraste minimum après enhancement
+    min_resolution_width: 1200  # Largeur minimale de l'image finale
+    min_resolution_height: 1600  # Hauteur minimale de l'image finale
+
+# ==========================================
+# PDF PROCESSING
+# ==========================================
+
+pdf:
+  dpi: 300  # DPI pour la conversion PDF vers image
+  min_dpi: 300  # DPI minimum
+
+# ==========================================
+# QA FLAGS
+# ==========================================
+
+qa:
+  flags:
+    low_confidence_orientation: 0.70  # Seuil pour flag low_confidence_orientation
+    overcrop_risk: 0.08  # Seuil pour flag overcrop_risk (% du bord)
+    low_contrast: 50  # Seuil pour flag low_contrast_after_enhance
+    too_small_width: 1200  # Seuil pour flag too_small_final (largeur)
+    too_small_height: 1600  # Seuil pour flag too_small_final (hauteur)
+
+# ==========================================
+# COLOMETRY NORMALIZATION
+# ==========================================
+
+colometry:
+  enabled: false  # À implémenter
+  # Ajouter les paramètres de colometry ici
+
+# ==========================================
+# FEATURE EXTRACTION
+# ==========================================
+
+features:
+  checkboxes:
+    enabled: false  # À implémenter
+    min_confidence: 0.60
+  
+  ocr:
+    enabled: false  # À implémenter
+    min_confidence: 0.70
+
+# ==========================================
+# PERFORMANCE
+# ==========================================
+
+performance:
+  batch_size: 30  # Nombre de pages à traiter par batch
+  max_workers: 4  # Nombre de threads pour le traitement parallèle
+  lazy_load_models: true  # Charger les modèles uniquement quand nécessaire
+
+# ==========================================
+# OUTPUT
+# ==========================================
+
+output:
+  save_original: true  # Sauvegarder l'image originale
+  save_transformed: true  # Sauvegarder l'image transformée
+  save_qa_flags: true  # Sauvegarder les flags QA
+  save_transforms: true  # Sauvegarder les transformations appliquées
+  image_format: "png"  # Format d'image de sortie
+  jpeg_quality: 95  # Qualité JPEG si format = "jpg"
+

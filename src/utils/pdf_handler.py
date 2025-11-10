@@ -21,23 +21,27 @@ except ImportError:
     PYMUPDF_AVAILABLE = False
 
 
-def pdf_to_images(pdf_path: str, dpi: int = 300) -> List[np.ndarray]:
+def pdf_to_images(pdf_path: str, dpi: int = 300, min_dpi: int = 300) -> List[np.ndarray]:
     """
     Convertit un PDF en liste d'images
     
     Args:
         pdf_path: Chemin vers le fichier PDF
-        dpi: Résolution DPI pour la conversion (défaut: 200)
+        dpi: Résolution DPI pour la conversion (défaut: 300)
+        min_dpi: DPI minimum garanti (défaut: 300). Le DPI effectif sera max(dpi, min_dpi)
         
     Returns:
         list: Liste d'images numpy (une par page)
     """
     images = []
     
+    # S'assurer que le DPI est au moins min_dpi
+    actual_dpi = max(dpi, min_dpi)
+    
     # Essayer d'abord avec pdf2image
     if PDF2IMAGE_AVAILABLE:
         try:
-            pil_images = convert_from_path(pdf_path, dpi=dpi)
+            pil_images = convert_from_path(pdf_path, dpi=actual_dpi)
             for pil_img in pil_images:
                 # Convertir PIL Image en numpy array (BGR pour OpenCV)
                 img_array = np.array(pil_img)
@@ -57,9 +61,8 @@ def pdf_to_images(pdf_path: str, dpi: int = 300) -> List[np.ndarray]:
             doc = fitz.open(pdf_path)
             for page_num in range(len(doc)):
                 page = doc[page_num]
-                # Rendre la page en image à 300 DPI minimum via get_pixmap
-                # S'assurer que le DPI est au moins 300
-                actual_dpi = max(dpi, 300)
+                # Rendre la page en image avec DPI minimum garanti via get_pixmap
+                # actual_dpi est déjà calculé plus haut (max(dpi, min_dpi))
                 mat = fitz.Matrix(actual_dpi / 72, actual_dpi / 72)  # 72 est le DPI par défaut
                 pix = page.get_pixmap(matrix=mat)
                 # Convertir en numpy array
@@ -97,7 +100,7 @@ def is_pdf(file_path: str) -> bool:
     return Path(file_path).suffix.lower() == '.pdf'
 
 
-def save_image_from_pdf(pdf_path: str, output_path: str, page_num: int = 0, dpi: int = 300) -> str:
+def save_image_from_pdf(pdf_path: str, output_path: str, page_num: int = 0, dpi: int = 300, min_dpi: int = 300) -> str:
     """
     Convertit une page d'un PDF en image et la sauvegarde
     
@@ -106,11 +109,12 @@ def save_image_from_pdf(pdf_path: str, output_path: str, page_num: int = 0, dpi:
         output_path: Chemin de sortie pour l'image
         page_num: Numéro de page (0-indexed)
         dpi: Résolution DPI
+        min_dpi: DPI minimum garanti (défaut: 300)
         
     Returns:
         str: Chemin de l'image sauvegardée
     """
-    images = pdf_to_images(pdf_path, dpi=dpi)
+    images = pdf_to_images(pdf_path, dpi=dpi, min_dpi=min_dpi)
     if page_num >= len(images):
         raise ValueError(f"Page {page_num} n'existe pas. Le PDF a {len(images)} page(s).")
     

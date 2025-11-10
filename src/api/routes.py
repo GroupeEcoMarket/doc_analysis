@@ -2,22 +2,27 @@
 API routes for document analysis
 """
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks
+from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks, Depends
 from fastapi.responses import JSONResponse
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple, Annotated
 from pydantic import BaseModel, Field
 import os
 from pathlib import Path
+import numpy as np
+import cv2
+import time
 
 from src.services.processing_service import ProcessingService
 from src.services.task_manager import get_task_manager, TaskStatus
 from src.api.dependencies import (
     get_preprocessing_normalizer,
     get_geometry_normalizer,
-    get_app_config
+    get_app_config,
+    get_feature_extractor
 )
 from src.pipeline.preprocessing import PreprocessingNormalizer
 from src.pipeline.geometry import GeometryNormalizer
+from src.pipeline.features import FeatureExtractor
 from src.utils.logger import get_logger, get_request_id
 from src.utils.exceptions import (
     GeometryError, 
@@ -26,8 +31,7 @@ from src.utils.exceptions import (
     ImageProcessingError,
     PipelineError
 )
-from typing import Annotated
-from fastapi import Depends
+from src.utils.pdf_handler import is_pdf
 
 logger = get_logger(__name__)
 
@@ -105,6 +109,25 @@ class StatusResponse(BaseModel):
     """Response model for pipeline status endpoint"""
     status: str = Field(..., description="Overall pipeline status")
     stages: List[str] = Field(..., description="List of available pipeline stages")
+
+
+class OCRLineResponse(BaseModel):
+    """Response model for a single OCR line"""
+    text: str = Field(..., description="Le texte reconnu de la ligne")
+    confidence: float = Field(..., description="Le score de confiance de la reconnaissance")
+    bounding_box: List[Tuple[int, int]] = Field(
+        ..., 
+        description="Les 4 points de la boîte englobante [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]"
+    )
+
+
+class FeaturesResponse(BaseModel):
+    """Response model for feature extraction endpoint"""
+    status: str = Field(..., description="Statut du traitement")
+    filename: Optional[str] = Field(None, description="Nom du fichier d'entrée")
+    line_count: int = Field(..., description="Nombre de lignes de texte extraites")
+    lines: List[OCRLineResponse] = Field(..., description="Liste des lignes de texte extraites")
+    processing_time: float = Field(..., description="Temps de traitement en secondes")
 
 
 class TaskResponse(BaseModel):
@@ -474,48 +497,141 @@ async def pipeline_geometry(
             pass
 
 
+def pdf_buffer_to_image(pdf_buffer: bytes, dpi: int = 300) -> np.ndarray:
+    """
+    Convertit un PDF depuis un buffer mémoire en image numpy.
+    
+    Args:
+        pdf_buffer: Contenu du PDF en bytes
+        dpi: Résolution DPI pour la conversion
+        
+    Returns:
+        np.ndarray: Image numpy (première page)
+        
+    Raises:
+        HTTPException: Si la conversion échoue
+    """
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        raise HTTPException(
+            status_code=500,
+            detail="PyMuPDF n'est pas installé. Installez-le avec: pip install PyMuPDF"
+        )
+    
+    try:
+        # Ouvrir le PDF depuis le buffer mémoire
+        doc = fitz.open(stream=pdf_buffer, filetype="pdf")
+        if len(doc) == 0:
+            doc.close()
+            raise HTTPException(status_code=400, detail="Le PDF est vide.")
+        
+        # Récupérer la première page
+        page = doc[0]
+        # Utiliser min_dpi depuis la config (défaut: 300 si non disponible)
+        from src.utils.config_loader import get_config
+        try:
+            pdf_config = get_config().pdf
+            min_dpi = pdf_config.min_dpi
+        except:
+            min_dpi = 300  # Fallback si la config n'est pas disponible
+        actual_dpi = max(dpi, min_dpi)
+        mat = fitz.Matrix(actual_dpi / 72, actual_dpi / 72)
+        pix = page.get_pixmap(matrix=mat)
+        
+        # Convertir en numpy array
+        img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+            pix.height, pix.width, pix.n
+        )
+        
+        # Convertir le format de couleur selon le nombre de canaux
+        if pix.n == 4:  # RGBA
+            img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2BGR)
+        elif pix.n == 3:  # RGB
+            img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+        elif pix.n == 1:  # Grayscale
+            img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2BGR)
+        
+        doc.close()
+        return img_array
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Impossible de convertir le PDF en image: {str(e)}"
+        )
+
+
 @router.post(
     "/pipeline/features",
-    response_model=NotImplementedResponse,
-    status_code=501,
-    summary="Feature Extraction",
+    response_model=FeaturesResponse,
+    summary="Feature Extraction (OCR)",
     description="""
-    Extracts features from documents including OCR text and checkbox detection.
+    Extrait le texte d'un document image ou PDF, ligne par ligne, en utilisant PaddleOCR.
     
-    **Status:** Not yet implemented
+    **Processus :**
+    1. Valide et charge le fichier uploadé.
+    2. Si c'est un PDF, convertit la première page en image.
+    3. Appelle le moteur OCR pour extraire chaque ligne de texte.
+    4. Retourne une liste structurée de lignes avec texte, confiance et coordonnées.
     
-    **Planned Functionality:**
-    This endpoint will extract structured information from documents:
-    
-    - **OCR (Optical Character Recognition):**
-      - Text extraction from images using Tesseract or similar OCR engine
-      - Multi-language support (configurable default language)
-      - Confidence-based filtering of recognized text
-      - Word and line-level text extraction with coordinates
-    
-    - **Checkbox Detection:**
-      - Automatic detection of checkbox elements in documents
-      - Classification of checkboxes as checked or unchecked
-      - Confidence thresholds for detection and state classification
-    
-    **Future Parameters:**
-    - OCR language settings (default: French)
-    - OCR confidence thresholds
-    - Checkbox detection confidence thresholds
-    - Checkbox checked state thresholds
-    
-    **Note:** This feature is planned for future implementation. Check the pipeline status endpoint
-    for current implementation status.
+    Cette étape est optimisée pour la vitesse et sert de base pour la classification
+    de documents et la localisation d'ancres.
     """
 )
-async def pipeline_features(file: UploadFile = File(...)) -> NotImplementedResponse:
+async def pipeline_features(
+    feature_extractor: Annotated[FeatureExtractor, Depends(get_feature_extractor)],
+    file: UploadFile = File(...)
+) -> FeaturesResponse:
     """
-    Feature extraction endpoint (not yet implemented).
+    Extrait les features (OCR) d'un document.
     """
-    return NotImplementedResponse(
-        status="not_implemented",
-        message="Feature extraction - Not yet implemented"
-    )
+    start_time = time.time()
+    
+    try:
+        # Lire le contenu du fichier
+        file_content = await file.read()
+        if not file_content:
+            raise HTTPException(status_code=400, detail="Le fichier est vide.")
+        
+        # Convertir en image NumPy
+        image_np: np.ndarray
+        
+        if is_pdf(file.filename or ""):
+            # Utiliser PyMuPDF pour convertir le PDF en mémoire
+            image_np = pdf_buffer_to_image(file_content, dpi=300)
+        else:
+            # Convertir l'image directement depuis le buffer mémoire
+            image_np = cv2.imdecode(np.frombuffer(file_content, np.uint8), cv2.IMREAD_COLOR)
+            if image_np is None:
+                raise HTTPException(status_code=400, detail="Format d'image invalide ou corrompu.")
+        
+        # Appeler notre FeatureExtractor
+        extracted_lines = feature_extractor.extract_ocr(image_np)
+        
+        processing_time = time.time() - start_time
+        
+        # Convertir les dictionnaires en OCRLineResponse
+        ocr_lines = [
+            OCRLineResponse(**line) for line in extracted_lines
+        ]
+        
+        return FeaturesResponse(
+            status="success",
+            filename=file.filename,
+            line_count=len(ocr_lines),
+            lines=ocr_lines,
+            processing_time=processing_time
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur lors de l'extraction de features : {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur interne du serveur : {str(e)}"
+        )
 
 
 @router.get(

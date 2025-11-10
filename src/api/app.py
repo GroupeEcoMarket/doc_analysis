@@ -2,6 +2,9 @@
 FastAPI application for document analysis
 """
 
+from src.utils.bootstrap import configure_paddle_environment
+configure_paddle_environment()  # Doit être appelé avant toutes les autres importations
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .routes import router

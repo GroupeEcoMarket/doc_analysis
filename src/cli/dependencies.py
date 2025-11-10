@@ -11,6 +11,7 @@ from typing import Optional
 from src.utils.config_loader import get_config, Config, GeometryConfig, QAConfig
 from src.pipeline.preprocessing import PreprocessingNormalizer
 from src.pipeline.geometry import GeometryNormalizer
+from src.pipeline.colometry import ColometryNormalizer
 from src.utils.capture_classifier import CaptureClassifier
 from src.models.registry import ModelRegistry
 
@@ -98,7 +99,11 @@ def get_preprocessing_normalizer(
         geo_config = get_geometry_config(app_config)
         capture_classifier = get_capture_classifier(geo_config)
     
-    return PreprocessingNormalizer(capture_classifier=capture_classifier)
+    # Récupérer la configuration PDF
+    app_config = get_app_config(config_path)
+    pdf_config = app_config.pdf
+    
+    return PreprocessingNormalizer(capture_classifier=capture_classifier, pdf_config=pdf_config)
 
 
 def get_model_registry() -> ModelRegistry:
@@ -134,3 +139,40 @@ def get_geometry_normalizer(
         model_registry=model_registry
     )
 
+
+def get_colometry_normalizer(
+    config_path: Optional[str] = None
+) -> ColometryNormalizer:
+    """
+    Crée et retourne un normaliseur colométrique.
+    
+    Args:
+        config_path: Chemin vers le fichier de configuration (optionnel)
+        
+    Returns:
+        ColometryNormalizer: Instance du normaliseur
+    """
+    app_config = get_app_config(config_path)
+    
+    # Injecter la configuration via DI
+    return ColometryNormalizer(app_config=app_config)
+
+
+def get_feature_extractor(
+    config_path: Optional[str] = None
+) -> "FeatureExtractor":
+    """
+    Crée et retourne un extracteur de features.
+    
+    Args:
+        config_path: Chemin vers le fichier de configuration (optionnel)
+        
+    Returns:
+        FeatureExtractor: Instance de l'extracteur
+    """
+    from src.pipeline.features import FeatureExtractor
+    
+    app_config = get_app_config(config_path)
+    
+    # Injecter la configuration via DI
+    return FeatureExtractor(app_config=app_config)

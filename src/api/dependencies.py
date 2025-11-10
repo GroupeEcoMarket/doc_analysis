@@ -10,9 +10,10 @@ from typing import Annotated
 
 from fastapi import Depends
 
-from src.utils.config_loader import get_config, Config, GeometryConfig, QAConfig
+from src.utils.config_loader import get_config, Config, GeometryConfig, QAConfig, PDFConfig
 from src.pipeline.preprocessing import PreprocessingNormalizer
 from src.pipeline.geometry import GeometryNormalizer
+from src.pipeline.colometry import ColometryNormalizer
 from src.utils.capture_classifier import CaptureClassifier
 from src.models.registry import ModelRegistry
 
@@ -63,6 +64,21 @@ def get_qa_config(
     return app_config.qa
 
 
+def get_pdf_config(
+    app_config: Annotated[Config, Depends(get_app_config)]
+) -> PDFConfig:
+    """
+    Récupère la configuration PDF.
+    
+    Args:
+        app_config: Configuration de l'application (injectée)
+        
+    Returns:
+        PDFConfig: Configuration PDF
+    """
+    return app_config.pdf
+
+
 # ==========================================
 # Service Dependencies
 # ==========================================
@@ -87,18 +103,20 @@ def get_capture_classifier(
 
 
 def get_preprocessing_normalizer(
-    capture_classifier: Annotated[CaptureClassifier, Depends(get_capture_classifier)]
+    capture_classifier: Annotated[CaptureClassifier, Depends(get_capture_classifier)],
+    pdf_config: Annotated[PDFConfig, Depends(get_pdf_config)]
 ) -> PreprocessingNormalizer:
     """
     Crée et retourne un normaliseur de prétraitement.
     
     Args:
         capture_classifier: Classificateur de capture (injecté)
+        pdf_config: Configuration PDF (injectée)
         
     Returns:
         PreprocessingNormalizer: Instance du normaliseur
     """
-    return PreprocessingNormalizer(capture_classifier=capture_classifier)
+    return PreprocessingNormalizer(capture_classifier=capture_classifier, pdf_config=pdf_config)
 
 
 @lru_cache()
@@ -135,3 +153,37 @@ def get_geometry_normalizer(
         model_registry=model_registry
     )
 
+
+def get_colometry_normalizer(
+    app_config: Annotated[Config, Depends(get_app_config)]
+) -> ColometryNormalizer:
+    """
+    Crée et retourne un normaliseur colométrique.
+    
+    Args:
+        app_config: Configuration de l'application (injectée)
+        
+    Returns:
+        ColometryNormalizer: Instance du normaliseur
+    """
+    return ColometryNormalizer(app_config=app_config)
+
+
+@lru_cache()
+def get_feature_extractor(
+    app_config: Annotated[Config, Depends(get_app_config)]
+) -> "FeatureExtractor":
+    """
+    Crée et retourne un extracteur de features (singleton).
+    Le modèle OCR est chargé une seule fois au premier appel.
+    
+    Args:
+        app_config: Configuration de l'application (injectée)
+        
+    Returns:
+        FeatureExtractor: Instance de l'extracteur
+    """
+    from src.pipeline.features import FeatureExtractor
+    
+    # Injecter la configuration via DI
+    return FeatureExtractor(app_config=app_config)

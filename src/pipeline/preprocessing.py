@@ -13,7 +13,7 @@ import time
 from src.utils.file_handler import ensure_dir, get_files, get_output_path
 from src.utils.pdf_handler import is_pdf, pdf_to_images
 from src.utils.capture_classifier import CaptureClassifier
-from src.utils.config_loader import get_config, GeometryConfig
+from src.utils.config_loader import get_config, PDFConfig, GeometryConfig
 from src.utils.image_enhancer import enhance_contrast_clahe
 from src.utils.logger import get_logger
 from src.utils.exceptions import PreprocessingError, ImageProcessingError
@@ -28,7 +28,11 @@ class PreprocessingNormalizer:
     Applique les prétraitements à une image avant les étapes géométriques.
     """
 
-    def __init__(self, capture_classifier: Optional[CaptureClassifier] = None):
+    def __init__(
+        self, 
+        capture_classifier: Optional[CaptureClassifier] = None,
+        pdf_config: Optional[PDFConfig] = None
+    ):
         """
         Initialise le normaliseur de prétraitement.
         
@@ -36,6 +40,8 @@ class PreprocessingNormalizer:
             capture_classifier: Classificateur de capture (injecté via DI).
                               Si None, crée un classificateur avec la config par défaut
                               (pour compatibilité avec l'ancien code).
+            pdf_config: Configuration PDF (injectée via DI).
+                       Si None, charge depuis config.yaml (pour compatibilité).
         """
         if capture_classifier is None:
             # Fallback pour compatibilité : charger la config si non fournie
@@ -48,6 +54,13 @@ class PreprocessingNormalizer:
             )
         else:
             self.capture_classifier = capture_classifier
+        
+        # Charger la configuration PDF si non fournie
+        if pdf_config is None:
+            app_config = get_config()
+            self.pdf_config = app_config.pdf
+        else:
+            self.pdf_config = pdf_config
 
     def process(self, input_path: str, output_path: str) -> PreprocessingOutput:
         """
@@ -64,7 +77,8 @@ class PreprocessingNormalizer:
         start_time = time.time()
         
         if is_pdf(input_path):
-            images = pdf_to_images(input_path, dpi=300)
+            # Utiliser pdf_config.dpi et pdf_config.min_dpi pour la conversion
+            images = pdf_to_images(input_path, dpi=self.pdf_config.dpi, min_dpi=self.pdf_config.min_dpi)
             if not images:
                 raise PreprocessingError(f"Aucune page trouvée dans le PDF: {input_path}")
             img = images[0]
@@ -126,7 +140,8 @@ class PreprocessingNormalizer:
         for file_path in files:
             if is_pdf(file_path):
                 # Traiter chaque page du PDF séparément
-                pdf_images = pdf_to_images(file_path, dpi=300)
+                # Utiliser pdf_config.dpi et pdf_config.min_dpi pour la conversion
+                pdf_images = pdf_to_images(file_path, dpi=self.pdf_config.dpi, min_dpi=self.pdf_config.min_dpi)
                 if not pdf_images:
                     logger.warning(f"Aucune page trouvée dans le PDF: {file_path}")
                     continue

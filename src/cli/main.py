@@ -2,14 +2,18 @@
 Command-line interface for document analysis pipeline
 """
 
+from src.utils.bootstrap import configure_paddle_environment
+configure_paddle_environment()  # Doit être appelé avant toutes les autres importations
+
 import click
 import os
 from pathlib import Path
 from typing import Optional, Tuple
-from src.pipeline import ColometryNormalizer, FeatureExtractor
 from src.cli.dependencies import (
     get_preprocessing_normalizer,
     get_geometry_normalizer,
+    get_colometry_normalizer,
+    get_feature_extractor,
     get_app_config
 )
 from src.utils.config_loader import Config
@@ -29,7 +33,8 @@ def colometry(input: str, output: str, config: Optional[str]) -> None:
     """Normalisation colométrie"""
     click.echo(f"Normalisation colométrie: {input} -> {output}")
     
-    normalizer = ColometryNormalizer(config=config)
+    # Utiliser l'injection de dépendances
+    normalizer = get_colometry_normalizer(config_path=config)
     results = normalizer.process_batch(input, output)
     
     click.echo(f"Traitement terminé: {len(results)} documents traités")
@@ -73,7 +78,8 @@ def features(input: str, output: str, config: Optional[str]) -> None:
     """Extraction de features"""
     click.echo(f"Extraction de features: {input} -> {output}")
     
-    extractor = FeatureExtractor(config=config)
+    # Utiliser l'injection de dépendances
+    extractor = get_feature_extractor(config_path=config)
     results = extractor.process_batch(input, output)
     
     click.echo(f"Traitement terminé: {len(results)} documents traités")
@@ -112,10 +118,8 @@ def pipeline(input: str, output: str, config: Optional[str], stages: Tuple[str, 
     
     if "colometry" in stages:
         click.echo("Normalisation colométrie...")
-        # ColometryNormalizer n'utilise pas encore l'injection de dépendances
-        # (il accepte un dict config directement via get_config())
-        # Pour l'instant, on utilise get_config() directement
-        colometry_normalizer = ColometryNormalizer(config=config)
+        # Utiliser l'injection de dépendances
+        colometry_normalizer = get_colometry_normalizer(config_path=config)
         colometry_output = os.path.join(output, "colometry")
         os.makedirs(colometry_output, exist_ok=True)
         colometry_normalizer.process_batch(current_input, colometry_output)
@@ -132,10 +136,8 @@ def pipeline(input: str, output: str, config: Optional[str], stages: Tuple[str, 
     
     if "features" in stages:
         click.echo("Extraction de features...")
-        # FeatureExtractor n'utilise pas encore l'injection de dépendances
-        # (il accepte un dict config directement)
-        # Pour l'instant, on passe None et il utilisera get_config() en interne
-        feature_extractor = FeatureExtractor(config=None)
+        # Utiliser l'injection de dépendances
+        feature_extractor = get_feature_extractor(config_path=config)
         features_output = os.path.join(output, "features")
         os.makedirs(features_output, exist_ok=True)
         feature_extractor.process_batch(current_input, features_output)

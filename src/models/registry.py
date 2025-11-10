@@ -49,8 +49,14 @@ class ModelRegistry:
     - Faciliter les tests en permettant l'injection de modèles mock
     """
     
-    def __init__(self):
-        """Initialise le registre de modèles."""
+    def __init__(self, lazy_load: bool = True):
+        """
+        Initialise le registre de modèles.
+        
+        Args:
+            lazy_load: Si True, les modèles sont chargés à la demande (lazy loading).
+                      Si False, tous les modèles sont chargés au démarrage.
+        """
         # Cache des modèles chargés
         self._models: Dict[str, Any] = {}
         self._adapters: Dict[str, Any] = {}
@@ -62,7 +68,7 @@ class ModelRegistry:
                 name="page-orientation",
                 source="huggingface",
                 identifier="Felix92/onnxtr-mobilenet-v3-small-page-orientation",
-                lazy_load=True,
+                lazy_load=lazy_load,
                 description="Modèle de détection d'orientation de page (0°, 90°, 180°, 270°)"
             ),
             ModelType.DETECTION: ModelConfig(
@@ -70,10 +76,22 @@ class ModelRegistry:
                 name="page-detection",
                 source="doctr",
                 identifier="db_resnet50",
-                lazy_load=True,
+                lazy_load=lazy_load,
                 description="Modèle de détection de pages pour le crop intelligent"
             )
         }
+        
+        # Si lazy_load=False, charger tous les modèles maintenant
+        if not lazy_load:
+            logger.info("Chargement de tous les modèles au démarrage (lazy_load=False)")
+            try:
+                self.get_orientation_adapter()
+            except Exception as e:
+                logger.warning(f"Impossible de précharger le modèle d'orientation: {e}")
+            try:
+                self.get_detection_model()
+            except Exception as e:
+                logger.warning(f"Impossible de précharger le modèle de détection: {e}")
     
     def register_model(
         self,
@@ -114,6 +132,13 @@ class ModelRegistry:
         
         try:
             config = self._model_configs[ModelType.ORIENTATION]
+            
+            # Vérifier si le lazy loading est activé
+            if config.lazy_load and model_key in self._models and not force_reload:
+                # Le modèle est déjà chargé et lazy_load est activé, retourner l'adaptateur existant
+                if model_key in self._adapters:
+                    return self._adapters[model_key]
+            
             logger.info(f"Chargement du modèle d'orientation: {config.identifier}")
             
             # Charger le modèle brut
@@ -162,6 +187,12 @@ class ModelRegistry:
         
         try:
             config = self._model_configs[ModelType.DETECTION]
+            
+            # Vérifier si le lazy loading est activé
+            if config.lazy_load and model_key in self._models and not force_reload:
+                # Le modèle est déjà chargé et lazy_load est activé, retourner le modèle existant
+                return self._models[model_key]
+            
             logger.info(f"Chargement du modèle de détection: {config.identifier}")
             
             if config.source == "doctr":

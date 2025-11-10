@@ -72,11 +72,11 @@ def test_geometry_normalizer_with_pdf():
         geometry_results = geometry_normalizer.process_batch(str(preproc_output_dir), str(geometry_output_dir))
 
         # 4. Valider les résultats finaux
-        # Note: process_batch retourne List[Dict], pas List[GeometryOutput]
+        # Note: process_batch retourne List[GeometryOutput]
         assert len(geometry_results) > 0, "GeometryNormalizer n'a retourné aucun résultat."
-        assert geometry_results[0].get('status') == 'success', f"Le traitement de la géométrie a échoué: {geometry_results[0].get('error')}"
-        # process_batch retourne 'output_transformed_path' ou 'output_path'
-        output_path_key = 'output_transformed_path' if 'output_transformed_path' in geometry_results[0] else 'output_path'
-        assert output_path_key in geometry_results[0]
-        assert Path(geometry_results[0][output_path_key]).exists(), "Le fichier de sortie de la géométrie n'a pas été créé."
+        assert geometry_results[0].status == 'success', f"Le traitement de la géométrie a échoué: {getattr(geometry_results[0], 'error', 'Unknown error')}"
+        # process_batch retourne GeometryOutput avec output_transformed_path ou output_path
+        output_path = geometry_results[0].output_transformed_path or geometry_results[0].output_path
+        assert output_path, "Le chemin de sortie n'a pas été défini."
+        assert Path(output_path).exists(), f"Le fichier de sortie de la géométrie n'a pas été créé: {output_path}"
 

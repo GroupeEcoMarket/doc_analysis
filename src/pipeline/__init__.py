@@ -12,7 +12,11 @@ from .models import (
     PreprocessingOutput,
     CropMetadata,
     DeskewMetadata,
-    GeometryOutput
+    GeometryOutput,
+    ColometryOutput,
+    OCRLine,
+    CheckboxDetection,
+    FeaturesOutput
 )
 
 __all__ = [
@@ -26,5 +30,9 @@ __all__ = [
     "CropMetadata",
     "DeskewMetadata",
     "GeometryOutput",
+    "ColometryOutput",
+    "OCRLine",
+    "CheckboxDetection",
+    "FeaturesOutput",
 ]
 

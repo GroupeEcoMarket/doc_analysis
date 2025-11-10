@@ -108,26 +108,30 @@ pdf:
 
 qa:
   # Quality Assurance thresholds for flagging potential issues
+  # ⚠️ NOTE: Ces valeurs sont REDONDANTES et ne sont plus utilisées par le code.
+  # Le QADetector utilise maintenant directement geometry.* comme source unique de vérité.
+  # Ces valeurs sont conservées uniquement pour référence/compatibilité.
+  # Pour modifier les seuils, utilisez les paramètres dans geometry.* :
+  # - geometry.orientation.min_confidence (au lieu de qa.flags.low_confidence_orientation)
+  # - geometry.crop.max_margin_ratio (au lieu de qa.flags.overcrop_risk)
+  # - geometry.quality.min_contrast (au lieu de qa.flags.low_contrast)
+  # - geometry.quality.min_resolution_width (au lieu de qa.flags.too_small_width)
+  # - geometry.quality.min_resolution_height (au lieu de qa.flags.too_small_height)
   flags:
     # Threshold for flagging low confidence orientation detection.
-    # If orientation confidence is below this value, the low_confidence_orientation flag is raised.
-    # Should match geometry.orientation.min_confidence for consistency.
+    # DEPRECATED: Utilisez geometry.orientation.min_confidence
     low_confidence_orientation: 0.70
     # Threshold for flagging potential overcrop risk (as percentage of edge).
-    # If crop margin exceeds this ratio, the overcrop_risk flag is raised.
-    # Should match geometry.crop.max_margin_ratio for consistency.
+    # DEPRECATED: Utilisez geometry.crop.max_margin_ratio
     overcrop_risk: 0.08
     # Threshold for flagging low contrast after enhancement.
-    # If contrast is below this value, the low_contrast_after_enhance flag is raised.
-    # Should match geometry.quality.min_contrast for consistency.
+    # DEPRECATED: Utilisez geometry.quality.min_contrast
     low_contrast: 50
     # Threshold for flagging images that are too small (width).
-    # If final image width is below this value, the too_small_final flag is raised.
-    # Should match geometry.quality.min_resolution_width for consistency.
+    # DEPRECATED: Utilisez geometry.quality.min_resolution_width
     too_small_width: 1200
     # Threshold for flagging images that are too small (height).
-    # If final image height is below this value, the too_small_final flag is raised.
-    # Should match geometry.quality.min_resolution_height for consistency.
+    # DEPRECATED: Utilisez geometry.quality.min_resolution_height
     too_small_height: 1600
 
 # ==========================================
@@ -147,11 +151,19 @@ features:
   # OCR (Optical Character Recognition)
   # Extracts text content from images
   ocr:
-    enabled: false  # Enable/disable OCR text extraction
-    # Default language for Tesseract or other OCR engine.
-    # Common values: 'fra' (French), 'eng' (English), 'fra+eng' (multi-language).
+    enabled: true  # Enable/disable OCR text extraction
+    # Default language for PaddleOCR engine.
+    # Common values: 'fr' (French), 'en' (English), 'fr+en' (multi-language).
     # Using the correct language significantly improves recognition accuracy.
-    default_language: 'fra'
+    # Note: PaddleOCR uses 'fr' (not 'fra' like Tesseract).
+    default_language: 'fr'
+    # Enable GPU acceleration (requires compatible CUDA environment).
+    use_gpu: false
+    # Enable MKLDNN/OneDNN optimizations (may cause issues on some CPU builds, especially Windows).
+    enable_mkldnn: false
+    # Extra runtime options forwarded to PaddleOCR (e.g., cpu_threads).
+    # Leave empty by default for maximum compatibility.
+    runtime_options: {}
     # Minimum confidence threshold for a recognized word/line to be accepted.
     # Higher values (e.g., 0.85) are stricter and only accept high-confidence text, reducing false positives.
     # Lower values (e.g., 0.60) are more lenient but may include incorrectly recognized text.

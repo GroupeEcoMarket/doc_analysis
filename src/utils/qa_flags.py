@@ -8,7 +8,7 @@ import numpy as np
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, asdict
 import json
-from src.utils.config_loader import get_config
+from src.utils.config_loader import get_config, GeometryConfig
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -61,29 +61,39 @@ class QADetector:
     Détecteur de problèmes de qualité
     """
     
-    def __init__(self, config: Optional[Dict] = None):
+    def __init__(self, geo_config: Optional[GeometryConfig] = None, config: Optional[Dict] = None):
         """
         Initialise le détecteur QA
         
         Args:
-            config: Configuration optionnelle (dict ou None pour charger depuis config.yaml)
+            geo_config: Configuration géométrique (source unique de vérité pour les seuils).
+                       Si None, charge depuis config.yaml (pour compatibilité).
+            config: Configuration optionnelle (dict) pour compatibilité avec l'ancien format.
+                   Ignoré si geo_config est fourni.
         """
-        # Charger la configuration depuis config.yaml si non fournie
-        if config is None:
-            app_config = get_config()
-            qa_config = app_config.qa
-            geo_config = app_config.geometry
-            
-            self.orientation_confidence_threshold = qa_config.low_confidence_orientation
-            self.overcrop_threshold = qa_config.overcrop_risk * 100  # Convertir en %
-            self.min_resolution = [qa_config.too_small_width, qa_config.too_small_height]
-            self.contrast_threshold = float(qa_config.low_contrast)
-        else:
-            # Compatibilité avec l'ancien format dict
+        # Priorité: geo_config (source unique de vérité) > config (dict) > get_config() (fallback)
+        if geo_config is not None:
+            # Utiliser GeometryConfig comme source unique de vérité
+            self.orientation_confidence_threshold = geo_config.orientation_min_confidence
+            self.overcrop_threshold = geo_config.crop_max_margin_ratio * 100  # Convertir en %
+            self.min_resolution = [geo_config.quality_min_resolution_width, geo_config.quality_min_resolution_height]
+            self.contrast_threshold = float(geo_config.quality_min_contrast)
+        elif config is not None:
+            # Compatibilité avec l'ancien format dict (pour les tests)
             self.orientation_confidence_threshold = config.get('orientation_confidence_threshold', 0.70)
             self.overcrop_threshold = config.get('overcrop_threshold', 8.0)
             self.min_resolution = config.get('min_resolution', [1200, 1600])
             self.contrast_threshold = config.get('contrast_threshold', 50.0)
+        else:
+            # Fallback: charger depuis config.yaml
+            app_config = get_config()
+            geo_config = app_config.geometry
+            
+            # Utiliser geometry.* comme source unique de vérité
+            self.orientation_confidence_threshold = geo_config.orientation_min_confidence
+            self.overcrop_threshold = geo_config.crop_max_margin_ratio * 100  # Convertir en %
+            self.min_resolution = [geo_config.quality_min_resolution_width, geo_config.quality_min_resolution_height]
+            self.contrast_threshold = float(geo_config.quality_min_contrast)
     
     def detect_flags(self, 
                      original_image: np.ndarray,
@@ -124,6 +134,9 @@ class QADetector:
         # 3. no_quad_detected
         if crop_metadata.get('status') in ['no_detection', 'invalid_geometry', 'no_valid_detection']:
             flags.no_quad_detected = True
+        
+        # Note: Le statut 'rejected_overcrop' est géré dans intelligent_crop() qui rejette le crop
+        # avant qu'il ne soit appliqué, donc overcrop_risk ne sera pas levé car crop_applied=False
         
         # 4. dewarp_applied (crop avec perspective = dewarp)
         if crop_metadata.get('crop_applied', False) and 'transform_matrix' in crop_metadata:

@@ -170,3 +170,106 @@ class GeometryOutput(BaseModel):
         """
         return self.model_dump()
 
+
+class ColometryOutput(BaseModel):
+    """
+    Résultat de l'étape de normalisation colométrique.
+    
+    Ce modèle définit le contrat de sortie de l'étape colometry,
+    qui normalise la structure des colonnes d'un document.
+    """
+    status: str = Field(..., description="Statut du traitement: 'success' ou 'error'")
+    input_path: str = Field(..., description="Chemin vers le fichier d'entrée original")
+    output_path: str = Field(..., description="Chemin vers le document normalisé")
+    processing_time: float = Field(..., ge=0.0, description="Temps de traitement en secondes")
+    error: Optional[str] = Field(None, description="Message d'erreur si le traitement a échoué")
+    
+    # Métadonnées de colométrie (à définir selon l'implémentation)
+    columns_detected: Optional[int] = Field(None, description="Nombre de colonnes détectées")
+    column_structure: Optional[Dict[str, Any]] = Field(None, description="Structure des colonnes détectées")
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ColometryOutput":
+        """
+        Crée une instance depuis un dictionnaire (pour compatibilité avec l'ancien code).
+        
+        Args:
+            data: Dictionnaire avec les données de colometry
+            
+        Returns:
+            ColometryOutput: Instance du modèle
+        """
+        return cls(**data)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Convertit le modèle en dictionnaire (pour compatibilité avec l'ancien code).
+        
+        Returns:
+            dict: Dictionnaire avec les données
+        """
+        return self.model_dump()
+
+
+class OCRLine(BaseModel):
+    """Représente une ligne de texte détectée par OCR."""
+    text: str = Field(..., description="Texte de la ligne")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Confiance de la reconnaissance (0.0-1.0)")
+    bounding_box: List[float] = Field(..., min_length=4, max_length=4, description="Boîte englobante [x1, y1, x2, y2]")
+
+
+class CheckboxDetection(BaseModel):
+    """Représente une checkbox détectée."""
+    position: List[float] = Field(..., min_length=4, max_length=4, description="Position [x1, y1, x2, y2]")
+    checked: bool = Field(..., description="Si la checkbox est cochée")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Confiance de la détection (0.0-1.0)")
+
+
+class FeaturesOutput(BaseModel):
+    """
+    Résultat de l'étape d'extraction de features.
+    
+    Ce modèle définit le contrat de sortie de l'étape features,
+    qui extrait les features d'un document (OCR, checkboxes, etc.).
+    """
+    status: str = Field(..., description="Statut du traitement: 'success' ou 'error'")
+    input_path: str = Field(..., description="Chemin vers le fichier d'entrée original")
+    output_path: str = Field(..., description="Chemin vers le fichier de sortie des features")
+    processing_time: float = Field(..., ge=0.0, description="Temps de traitement en secondes")
+    error: Optional[str] = Field(None, description="Message d'erreur si le traitement a échoué")
+    
+    # Features extraites
+    ocr_lines: List[OCRLine] = Field(default_factory=list, description="Lignes de texte détectées par OCR")
+    checkboxes: List[CheckboxDetection] = Field(default_factory=list, description="Checkboxes détectées")
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "FeaturesOutput":
+        """
+        Crée une instance depuis un dictionnaire (pour compatibilité avec l'ancien code).
+        
+        Args:
+            data: Dictionnaire avec les données de features
+            
+        Returns:
+            FeaturesOutput: Instance du modèle
+        """
+        # Convertir ocr_lines en OCRLine si ce sont des dicts
+        if 'ocr_lines' in data and data['ocr_lines']:
+            if isinstance(data['ocr_lines'][0], dict):
+                data['ocr_lines'] = [OCRLine(**line) for line in data['ocr_lines']]
+        
+        # Convertir checkboxes en CheckboxDetection si ce sont des dicts
+        if 'checkboxes' in data and data['checkboxes']:
+            if isinstance(data['checkboxes'][0], dict):
+                data['checkboxes'] = [CheckboxDetection(**box) for box in data['checkboxes']]
+        
+        return cls(**data)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Convertit le modèle en dictionnaire (pour compatibilité avec l'ancien code).
+        
+        Returns:
+            dict: Dictionnaire avec les données
+        """
+        return self.model_dump()

@@ -16,7 +16,7 @@ from src.utils.transform_handler import (
     TransformSequence, Transform, save_transforms, get_transform_file_path
 )
 from src.utils.qa_flags import QADetector, QAFlags, save_qa_flags
-from src.utils.config_loader import get_config, GeometryConfig, QAConfig
+from src.utils.config_loader import get_config, GeometryConfig, QAConfig, PerformanceConfig, OutputConfig
 from src.utils.logger import get_logger
 from src.utils.exceptions import GeometryError, ModelLoadingError, ImageProcessingError
 from src.pipeline.models import GeometryOutput, CropMetadata, DeskewMetadata
@@ -338,6 +338,8 @@ class GeometryNormalizer:
         self,
         geo_config: Optional[GeometryConfig] = None,
         qa_config: Optional[QAConfig] = None,
+        perf_config: Optional[PerformanceConfig] = None,
+        output_config: Optional[OutputConfig] = None,
         model_registry: Optional["ModelRegistry"] = None
     ):
         """
@@ -348,27 +350,37 @@ class GeometryNormalizer:
                        Si None, charge la config depuis config.yaml (pour compatibilité).
             qa_config: Configuration QA (injectée via DI).
                       Si None, charge la config depuis config.yaml (pour compatibilité).
+            perf_config: Configuration de performance (injectée via DI).
+                        Si None, charge la config depuis config.yaml (pour compatibilité).
+            output_config: Configuration de sortie (injectée via DI).
+                          Si None, charge la config depuis config.yaml (pour compatibilité).
             model_registry: Registre de modèles (injecté via DI).
                           Si None, crée un registre par défaut (pour compatibilité).
         """
         # Charger la configuration si non fournie (fallback pour compatibilité)
-        if geo_config is None or qa_config is None:
+        if geo_config is None or qa_config is None or perf_config is None or output_config is None:
             app_config = get_config()
             self.geo_config = geo_config or app_config.geometry
             self.qa_config = qa_config or app_config.qa
+            self.perf_config = perf_config or app_config.performance
+            self.output_config = output_config or app_config.output
         else:
             self.geo_config = geo_config
             self.qa_config = qa_config
+            self.perf_config = perf_config
+            self.output_config = output_config
         
         # Registre de modèles (injection de dépendances)
         if model_registry is None:
             from src.models.registry import ModelRegistry
-            self.model_registry = ModelRegistry()
+            # Passer lazy_load_models au ModelRegistry
+            self.model_registry = ModelRegistry(lazy_load=self.perf_config.lazy_load_models)
         else:
             self.model_registry = model_registry
         
         # Charger les paramètres directement depuis la config
         self.crop_threshold = self.geo_config.crop_min_area_ratio
+        self.crop_max_margin_ratio = self.geo_config.crop_max_margin_ratio
         self.enable_crop = self.geo_config.crop_enabled
         self.enable_deskew = self.geo_config.deskew_enabled
         self.deskew_max_angle = self.geo_config.deskew_max_angle
@@ -376,8 +388,37 @@ class GeometryNormalizer:
         self.deskew_min_confidence = self.geo_config.deskew_min_confidence
         self.deskew_hough_threshold = self.geo_config.deskew_hough_threshold
         
+        # Orientation confidence threshold
+        self.orientation_min_confidence = self.geo_config.orientation_min_confidence
+        
         # Capture classifier (pour décider si on skip le crop)
         self.capture_classifier_skip_crop_if_scan = self.geo_config.capture_classifier_skip_crop_if_scan
+    
+    def _save_image(self, output_path: str, image: np.ndarray) -> None:
+        """
+        Sauvegarde une image dans le format configuré.
+        
+        Args:
+            output_path: Chemin de sortie (sans extension)
+            image: Image à sauvegarder (format OpenCV BGR)
+        """
+        # Déterminer l'extension selon le format configuré
+        image_format = self.output_config.image_format.lower()
+        if image_format == 'jpg' or image_format == 'jpeg':
+            # Ajouter l'extension .jpg si nécessaire
+            if not output_path.lower().endswith(('.jpg', '.jpeg')):
+                output_path = str(Path(output_path).with_suffix('.jpg'))
+            # Sauvegarder en JPEG avec la qualité configurée
+            cv2.imwrite(
+                output_path,
+                image,
+                [cv2.IMWRITE_JPEG_QUALITY, self.output_config.jpeg_quality]
+            )
+        else:
+            # Par défaut, sauvegarder en PNG (lossless)
+            if not output_path.lower().endswith('.png'):
+                output_path = str(Path(output_path).with_suffix('.png'))
+            cv2.imwrite(output_path, image)
     
     def _get_orientation_adapter(self) -> OrientationModelAdapter:
         """
@@ -570,16 +611,47 @@ class GeometryNormalizer:
                 metadata['status'] = 'already_cropped'
                 return image, metadata
             
-            # Découper et redresser
-            metadata['crop_applied'] = True
-            metadata['status'] = 'cropped'
-            
             # Ordonner les points du polygone
             try:
                 target_points = fit_quad_to_pts(abs_corners)
             except Exception:
                 # Si fit_quad_to_pts échoue, utiliser les points directement
                 target_points = abs_corners.reshape(4, 2)
+            
+            # Calculer les marges du crop pour vérifier le risque d'overcrop
+            # Trouver les bords du quadrilatère détecté
+            min_x = float(target_points[:, 0].min())
+            max_x = float(target_points[:, 0].max())
+            min_y = float(target_points[:, 1].min())
+            max_y = float(target_points[:, 1].max())
+            
+            # Calculer les marges en pourcentage de chaque bord
+            margins = {
+                'top': (min_y / image_height) * 100,
+                'bottom': ((image_height - max_y) / image_height) * 100,
+                'left': (min_x / image_width) * 100,
+                'right': ((image_width - max_x) / image_width) * 100
+            }
+            
+            # Vérifier si une marge est inférieure au seuil (overcrop risk)
+            max_margin_threshold_percent = self.crop_max_margin_ratio * 100
+            if any(margin < max_margin_threshold_percent for margin in margins.values()):
+                # Rejeter le crop si une marge est trop petite
+                smallest_margin = min(margins.values())
+                logger.warning(
+                    f"Crop rejeté: marge minimale {smallest_margin:.2f}% < seuil {max_margin_threshold_percent:.2f}%. "
+                    f"Marges: top={margins['top']:.2f}%, bottom={margins['bottom']:.2f}%, "
+                    f"left={margins['left']:.2f}%, right={margins['right']:.2f}%"
+                )
+                metadata['status'] = 'rejected_overcrop'
+                metadata['reason'] = f'Marge minimale {smallest_margin:.2f}% < seuil {max_margin_threshold_percent:.2f}%'
+                metadata['margins'] = margins
+                return image, metadata
+            
+            # Découper et redresser
+            metadata['crop_applied'] = True
+            metadata['status'] = 'cropped'
+            metadata['margins'] = margins
             
             # Calculer les dimensions de la sortie
             # Calculer la largeur et hauteur du rectangle de sortie
@@ -844,23 +916,17 @@ class GeometryNormalizer:
             # Sauvegarder une copie de l'image originale pour QA
             original_image = img.copy()
             
-            if hasattr(self, '_current_output_original_path') and self._current_output_original_path:
+            # Sauvegarder l'image originale si configuré
+            if self.output_config.save_original and hasattr(self, '_current_output_original_path') and self._current_output_original_path:
                 try:
                     # S'assurer que le répertoire de destination existe
                     ensure_dir(os.path.dirname(self._current_output_original_path))
-                    cv2.imwrite(self._current_output_original_path, original_image)
+                    self._save_image(self._current_output_original_path, original_image)
                 except Exception as e:
                     logger.warning(f"Impossible de sauvegarder la copie de l'image source à {self._current_output_original_path}", exc_info=True)
 
-            # Initialiser le détecteur QA avec la config injectée
-            # Convertir QAConfig en dict pour QADetector (qui accepte un dict ou None)
-            qa_config_dict = {
-                'orientation_confidence_threshold': self.qa_config.low_confidence_orientation,
-                'overcrop_threshold': self.qa_config.overcrop_risk * 100,  # Convertir en %
-                'min_resolution': [self.qa_config.too_small_width, self.qa_config.too_small_height],
-                'contrast_threshold': float(self.qa_config.low_contrast)
-            }
-            qa_detector = QADetector(config=qa_config_dict)
+            # Initialiser le détecteur QA avec GeometryConfig comme source unique de vérité
+            qa_detector = QADetector(geo_config=self.geo_config)
             
             # Enregistrer la classification de capture si disponible
             if capture_info:
@@ -883,12 +949,17 @@ class GeometryNormalizer:
             crop_metadata = {}
             if self.enable_crop:
                 img, crop_metadata = self.intelligent_crop(img, capture_type=capture_type)
-                if crop_metadata.get('crop_applied', False):
-                    # Enregistrer la transformation de crop avec tous les paramètres
+                # Enregistrer la transformation de crop (même si rejetée) pour l'historique
+                if crop_metadata.get('status') in ['cropped', 'rejected_overcrop']:
                     crop_params = {
                         'area_ratio': crop_metadata.get('area_ratio', 1.0),
                         'status': crop_metadata.get('status', ''),
+                        'crop_applied': crop_metadata.get('crop_applied', False),
                     }
+                    # Ajouter la raison si le crop a été rejeté
+                    if crop_metadata.get('status') == 'rejected_overcrop':
+                        crop_params['reason'] = crop_metadata.get('reason', '')
+                        crop_params['margins'] = crop_metadata.get('margins', {})
                     # Ajouter les paramètres de transformation si disponibles
                     if 'transform_matrix' in crop_metadata:
                         crop_params['transform_matrix'] = crop_metadata['transform_matrix']
@@ -965,36 +1036,62 @@ class GeometryNormalizer:
             # Étape 6: Rotation Finale (cv2.rotate)
             rotation_applied = False
             rotation_angle = 0
-            if orientation_result['needs_rotation']:
-                angle = orientation_result['angle']
-                rotation_angle = angle
-                # Appliquer la rotation directement sur l'image en mémoire
-                if angle == 90:
-                    img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
-                elif angle == 180:
-                    img = cv2.rotate(img, cv2.ROTATE_180)
-                elif angle == 270:
-                    img = cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
-                else:
-                    # Rotation arbitraire
-                    h, w = img.shape[:2]
-                    center = (w // 2, h // 2)
-                    M = cv2.getRotationMatrix2D(center, angle, 1.0)
-                    img = cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_LINEAR)
-                rotation_applied = True
-                
-                # Enregistrer la transformation de rotation
-                transform_sequence.add_transform(Transform(
-                    transform_type='rotation',
-                    params={
-                        'angle': angle,
-                        'rotation_type': 'standard' if angle in [90, 180, 270] else 'arbitrary'
-                    },
-                    order=3
-                ))
+            orientation_confidence = orientation_result.get('confidence', 1.0)
             
-            # Sauvegarder l'image finale
-            cv2.imwrite(output_path, img)
+            # Vérifier la confiance avant d'appliquer la rotation
+            if orientation_result['needs_rotation']:
+                if orientation_confidence < self.orientation_min_confidence:
+                    logger.warning(
+                        f"Rotation rejetée: confiance {orientation_confidence:.2f} < seuil {self.orientation_min_confidence:.2f}. "
+                        f"Angle détecté: {orientation_result.get('angle', 0)}°"
+                    )
+                    # Ne pas appliquer la rotation si la confiance est insuffisante
+                    rotation_applied = False
+                    rotation_angle = 0
+                    # Enregistrer que la rotation a été rejetée pour l'historique
+                    transform_sequence.add_transform(Transform(
+                        transform_type='rotation',
+                        params={
+                            'angle': orientation_result.get('angle', 0),
+                            'confidence': orientation_confidence,
+                            'status': 'rejected',
+                            'reason': f'Confidence {orientation_confidence:.2f} < threshold {self.orientation_min_confidence:.2f}'
+                        },
+                        order=3
+                    ))
+                else:
+                    angle = orientation_result['angle']
+                    rotation_angle = angle
+                    # Appliquer la rotation directement sur l'image en mémoire
+                    if angle == 90:
+                        img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+                    elif angle == 180:
+                        img = cv2.rotate(img, cv2.ROTATE_180)
+                    elif angle == 270:
+                        img = cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                    else:
+                        # Rotation arbitraire
+                        h, w = img.shape[:2]
+                        center = (w // 2, h // 2)
+                        M = cv2.getRotationMatrix2D(center, angle, 1.0)
+                        img = cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_LINEAR)
+                    rotation_applied = True
+                    
+                    # Enregistrer la transformation de rotation
+                    transform_sequence.add_transform(Transform(
+                        transform_type='rotation',
+                        params={
+                            'angle': angle,
+                            'confidence': orientation_confidence,
+                            'status': 'applied',
+                            'rotation_type': 'standard' if angle in [90, 180, 270] else 'arbitrary'
+                        },
+                        order=3
+                    ))
+            
+            # Sauvegarder l'image finale si configuré
+            if self.output_config.save_transformed:
+                self._save_image(output_path, img)
             
             # Calculer le temps de traitement
             processing_time = time.time() - start_time
@@ -1028,17 +1125,19 @@ class GeometryNormalizer:
                 processing_time=processing_time
             )
             
-            # Sauvegarder les flags QA
-            try:
-                save_qa_flags(output_path, qa_flags)
-            except Exception as e:
-                logger.error("Erreur lors de la sauvegarde des flags QA", exc_info=True)
+            # Sauvegarder les flags QA si configuré
+            if self.output_config.save_qa_flags:
+                try:
+                    save_qa_flags(output_path, qa_flags)
+                except Exception as e:
+                    logger.error("Erreur lors de la sauvegarde des flags QA", exc_info=True)
             
-            # Sauvegarder la séquence de transformations
-            try:
-                save_transforms(output_path, transform_sequence)
-            except Exception as e:
-                logger.error("Erreur lors de la sauvegarde des transformations", exc_info=True)
+            # Sauvegarder la séquence de transformations si configuré
+            if self.output_config.save_transforms:
+                try:
+                    save_transforms(output_path, transform_sequence)
+                except Exception as e:
+                    logger.error("Erreur lors de la sauvegarde des transformations", exc_info=True)
             
             # Créer les modèles de métadonnées
             crop_metadata_obj = CropMetadata(**crop_metadata)
@@ -1072,9 +1171,9 @@ class GeometryNormalizer:
             # Convertir les autres exceptions en GeometryError
             raise GeometryError(f"Erreur lors du traitement géométrique: {str(e)}") from e
     
-    def process_batch(self, input_dir: str, output_dir: str) -> List[Dict[str, Any]]:
+    def process_batch(self, input_dir: str, output_dir: str) -> List[GeometryOutput]:
         """
-        Traite un lot de documents depuis le répertoire preprocessing
+        Traite un lot de documents depuis le répertoire preprocessing avec parallélisation et batching
         
         Args:
             input_dir: Répertoire contenant les images prétraitées (sortie de preprocessing)
@@ -1084,6 +1183,7 @@ class GeometryNormalizer:
             list: Liste des résultats pour chaque document
         """
         import json
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         
         ensure_dir(output_dir)
         
@@ -1091,78 +1191,130 @@ class GeometryNormalizer:
         image_extensions = ['.png', '.jpg', '.jpeg']
         files = get_files(input_dir, extensions=image_extensions)
         
+        # Traiter par batches avec parallélisation
+        batch_size = self.perf_config.batch_size
+        max_workers = self.perf_config.max_workers
         results = []
-        for idx, file_path in enumerate(files):
+        
+        # Diviser les fichiers en batches
+        for batch_start in range(0, len(files), batch_size):
+            batch_end = min(batch_start + batch_size, len(files))
+            batch_files = files[batch_start:batch_end]
             
-            try:
-                # Charger l'image prétraitée
-                img = cv2.imread(file_path)
-                if img is None:
-                    raise ImageProcessingError(f"Impossible de charger l'image: {file_path}")
+            logger.info(f"Traitement du batch {batch_start // batch_size + 1} ({len(batch_files)} fichiers)")
+            
+            # Traiter le batch en parallèle
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(self._process_single_file, file_path, output_dir): file_path
+                    for file_path in batch_files
+                }
                 
-                # Essayer de charger les métadonnées de preprocessing (si disponibles)
-                # Format attendu: fichier.json avec le même nom que l'image
-                metadata_path = Path(file_path).with_suffix('.json')
-                capture_type = 'PHOTO'  # Par défaut
-                capture_info = None
-                original_input_path = file_path  # Par défaut, utiliser le chemin de l'image prétraitée
-                
-                if metadata_path.exists():
+                for future in as_completed(futures):
+                    file_path = futures[future]
                     try:
-                        with open(metadata_path, 'r') as f:
-                            metadata = json.load(f)
-                            capture_type = metadata.get('capture_type', 'PHOTO')
-                            capture_info = metadata.get('capture_info', {})
-                            original_input_path = metadata.get('input_path', file_path)
+                        result = future.result()
+                        if result:
+                            results.append(result)
                     except Exception as e:
-                        logger.warning(f"Impossible de charger les métadonnées de {metadata_path}", exc_info=True)
-                
-                # Générer les chemins de sortie
-                base_output = get_output_path(file_path, output_dir)
-                path_obj = Path(base_output)
-                
-                # Chemin pour l'image transformée
-                output_transformed_path = str(path_obj.with_stem(f"{path_obj.stem}_transformed"))
-                
-                # Stocker le chemin original pour l'utiliser dans process()
-                output_original_path = str(path_obj.with_stem(f"{path_obj.stem}_original"))
-                self._current_output_original_path = output_original_path
-                
-                # Traiter l'image
-                result = self.process(
-                    img=img,
-                    output_path=output_transformed_path,
-                    capture_type=capture_type,
-                    original_input_path=original_input_path,
-                    capture_info=capture_info
-                )
-                
-                # Mettre à jour les chemins dans le résultat
-                result.output_original_path = output_original_path
-                result.output_transformed_path = output_transformed_path
-                
-                # Convertir en dict pour compatibilité avec process_batch
-                results.append(result.to_dict())
-                
-                # Vérifier que les fichiers ont été créés
-                qa_file = Path(output_transformed_path).with_suffix('.qa.json')
-                transform_file = Path(output_transformed_path).with_suffix('.transform.json')
-                if not qa_file.exists():
-                    logger.warning(f"Fichier QA non créé pour {file_path}: {qa_file}")
-                if not transform_file.exists():
-                    logger.warning(f"Fichier transformation non créé pour {file_path}: {transform_file}")
-                    
-            except Exception as e:
-                logger.error(f"Erreur lors du traitement de {file_path}", exc_info=True)
-                # Convertir en GeometryError pour uniformiser
-                if not isinstance(e, GeometryError):
-                    e = GeometryError(f"Erreur lors du traitement de {file_path}: {str(e)}")
-                # Pour process_batch, on continue avec les autres fichiers mais on enregistre l'erreur
-                results.append({
-                    'input_path': file_path,
-                    'status': 'error',
-                    'error': str(e)
-                })
+                        logger.error(f"Erreur lors du traitement de {file_path}", exc_info=True)
+                        # Créer un GeometryOutput avec status='error'
+                        error_output = GeometryOutput(
+                            status='error',
+                            input_path=file_path,
+                            output_path='',
+                            output_transformed_path='',
+                            transform_file='',
+                            qa_file='',
+                            crop_applied=False,
+                            crop_metadata=CropMetadata(
+                                crop_applied=False,
+                                area_ratio=0.0,
+                                status='error'
+                            ),
+                            deskew_applied=False,
+                            deskew_angle=0.0,
+                            deskew_metadata=DeskewMetadata(
+                                deskew_applied=False,
+                                angle=0.0,
+                                confidence=0.0,
+                                status='error'
+                            ),
+                            orientation_detected=False,
+                            angle=0,
+                            rotation_applied=False,
+                            transforms={},
+                            qa_flags={},
+                            processing_time=0.0,
+                            error=str(e)
+                        )
+                        results.append(error_output)
         
         return results
+    
+    def _process_single_file(self, file_path: str, output_dir: str) -> Optional[GeometryOutput]:
+        """
+        Traite un seul fichier (méthode helper pour le traitement parallèle).
+        
+        Args:
+            file_path: Chemin vers le fichier à traiter
+            output_dir: Répertoire de sortie
+            
+        Returns:
+            GeometryOutput ou None en cas d'erreur
+        """
+        import json
+        
+        try:
+            # Charger l'image prétraitée
+            img = cv2.imread(file_path)
+            if img is None:
+                raise ImageProcessingError(f"Impossible de charger l'image: {file_path}")
+            
+            # Essayer de charger les métadonnées de preprocessing (si disponibles)
+            # Format attendu: fichier.json avec le même nom que l'image
+            metadata_path = Path(file_path).with_suffix('.json')
+            capture_type = 'PHOTO'  # Par défaut
+            capture_info = None
+            original_input_path = file_path  # Par défaut, utiliser le chemin de l'image prétraitée
+            
+            if metadata_path.exists():
+                try:
+                    with open(metadata_path, 'r') as f:
+                        metadata = json.load(f)
+                        capture_type = metadata.get('capture_type', 'PHOTO')
+                        capture_info = metadata.get('capture_info', {})
+                        original_input_path = metadata.get('input_path', file_path)
+                except Exception as e:
+                    logger.warning(f"Impossible de charger les métadonnées de {metadata_path}", exc_info=True)
+            
+            # Générer les chemins de sortie
+            base_output = get_output_path(file_path, output_dir)
+            path_obj = Path(base_output)
+            
+            # Chemin pour l'image transformée
+            output_transformed_path = str(path_obj.with_stem(f"{path_obj.stem}_transformed"))
+            
+            # Stocker le chemin original pour l'utiliser dans process()
+            output_original_path = str(path_obj.with_stem(f"{path_obj.stem}_original"))
+            self._current_output_original_path = output_original_path
+            
+            # Traiter l'image
+            result = self.process(
+                img=img,
+                output_path=output_transformed_path,
+                capture_type=capture_type,
+                original_input_path=original_input_path,
+                capture_info=capture_info
+            )
+            
+            # Mettre à jour les chemins dans le résultat
+            result.output_original_path = output_original_path
+            result.output_transformed_path = output_transformed_path
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Erreur lors du traitement de {file_path}", exc_info=True)
+            raise
 

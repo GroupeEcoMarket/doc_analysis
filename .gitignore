@@ -50,6 +50,7 @@ data/output/*
 logs/
 qa_report.html
 digest.txt
+meta.json
 
 # OS
 .DS_Store

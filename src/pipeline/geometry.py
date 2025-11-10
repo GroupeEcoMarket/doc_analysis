@@ -221,16 +221,14 @@ class GeometryNormalizer:
                             confidence = max(0.0, min(1.0, raw_confidence))
                             processed_orientation = True
                             class_idx_display = class_indices[0] if len(class_indices) > 0 else "N/A"
-                            print(f"[DEBUG ONNX] OrientationPredictor -> class_idx={class_idx_display}, angle={angle}, confiance={confidence}")
                     except Exception as parse_error:
-                        print(f"[DEBUG ONNX] Erreur parsing OrientationPredictor: {parse_error}")
+                        print(f"⚠️ Erreur parsing OrientationPredictor: {parse_error}")
 
             if not processed_orientation:
                 # IMPORTANT: Traiter les listes EN PREMIER car elles peuvent contenir des arrays
                 # Si c'est une liste (doit être vérifié avant np.ndarray car une liste peut être convertie en array)
                 if isinstance(orientation_result, (list, tuple)) and len(orientation_result) > 0:
                     first_result = orientation_result[0]
-                    print(f"[DEBUG ONNX] Premier élément de la liste: type={type(first_result)}, valeur={first_result}")
                     
                     # Si c'est un array numpy dans la liste
                     if isinstance(first_result, np.ndarray):
@@ -262,14 +260,12 @@ class GeometryNormalizer:
                             arr = np.array(first_result)
                             # Vérifier que c'est bien un array numpy et pas une liste
                             if not isinstance(arr, np.ndarray):
-                                print(f"[DEBUG ONNX] Erreur: np.array() n'a pas créé un array numpy, type={type(arr)}")
+                                print(f"⚠️ Erreur: np.array() n'a pas créé un array numpy, type={type(arr)}")
                                 arr = None
                             else:
                                 # Vérifier que arr a l'attribut ndim avant d'y accéder
-                                if hasattr(arr, 'ndim'):
-                                    print(f"[DEBUG ONNX] Liste convertie en array: ndim={arr.ndim}, len={len(arr) if arr.ndim > 0 else 'N/A'}, valeurs={arr}")
-                                else:
-                                    print(f"[DEBUG ONNX] Liste convertie en array (pas d'attribut ndim): type={type(arr)}, valeurs={arr}")
+                                if not hasattr(arr, 'ndim'):
+                                    print(f"⚠️ Erreur: arr n'a pas l'attribut ndim, type={type(arr)}")
                                     arr = None
                         
                             if arr is not None and isinstance(arr, np.ndarray) and arr.ndim == 1 and len(arr) == 4:
@@ -312,7 +308,7 @@ class GeometryNormalizer:
                                     angle = angle_map.get(predicted_class, 0)
                                     confidence = float(np.max(probs))
                         except Exception as e:
-                            print(f"[DEBUG ONNX] Erreur conversion liste en array: {e}")
+                            print(f"⚠️ Erreur conversion liste en array: {e}")
                     # Si c'est un dictionnaire
                     elif isinstance(first_result, dict):
                         angle = int(first_result.get('orientation', first_result.get('angle', 0)))
@@ -653,9 +649,9 @@ class GeometryNormalizer:
         # Appliquer un seuil pour obtenir une image binaire
         # Utiliser Otsu pour un seuillage automatique
         _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        
+
         # Détecter les contours
-        # Utiliser Canny pour détecter les bords
+        # Utiliser Canny pour détecter les bords sur l'image binaire (binary) originale
         edges = cv2.Canny(binary, 50, 150, apertureSize=3)
         
         # Appliquer la transformée de Hough pour détecter les lignes
@@ -850,9 +846,7 @@ class GeometryNormalizer:
                     },
                     order=0  # Première transformation (après preprocessing)
                 ))
-            
-            print(f"[CAPTURE] Type reçu: {capture_type}")
-            
+                        
             # Étape 1: Détection de Page (doctr detection.db_resnet50)
             # Étape 2: Découpage & Redressement (cv2.warpPerspective)
             crop_metadata = {}
@@ -924,9 +918,7 @@ class GeometryNormalizer:
             orientation_input = temp_path
             
             # Étape 5: Classification 0/90/180/270 (onnxtr)
-            print(f"[DEBUG] Avant détection orientation, fichier: {orientation_input}")
             orientation_result = self.detect_orientation(orientation_input)
-            print(f"[DEBUG] Après détection orientation, résultat: {orientation_result}")
             
             # Nettoyer le fichier temporaire
             if temp_path and os.path.exists(temp_path):

@@ -161,12 +161,17 @@ python -m src.api.app
 
 L'API sera accessible sur `http://localhost:8000`
 
+**Documentation interactive :**
+- **Swagger UI** : `http://localhost:8000/docs`
+- **ReDoc** : `http://localhost:8000/redoc`
+
 Endpoints disponibles :
 - `POST /api/v1/analyze` : Analyser un document (pipeline complet)
 - `POST /api/v1/pipeline/colometry` : Normalisation colométrie
 - `POST /api/v1/pipeline/geometry` : Normalisation géométrie
 - `POST /api/v1/pipeline/features` : Extraction de features
 - `GET /api/v1/pipeline/status` : Statut du pipeline
+- `GET /api/v1/results/{task_id}` : Statut et résultats d'une tâche asynchrone
 
 ## Structure du projet
 

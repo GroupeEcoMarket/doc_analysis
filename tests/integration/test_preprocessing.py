@@ -10,14 +10,32 @@ import cv2
 from pathlib import Path
 from src.pipeline.preprocessing import PreprocessingNormalizer
 from src.utils.exceptions import PreprocessingError, ImageProcessingError
+from src.utils.capture_classifier import CaptureClassifier
+
+
+def create_preprocessing_normalizer(app_config):
+    """
+    Helper pour créer un PreprocessingNormalizer avec la vraie configuration.
+    Évite la répétition dans les tests d'intégration.
+    """
+    capture_classifier = CaptureClassifier(
+        white_level_threshold=app_config.geometry.capture_classifier_white_level_threshold,
+        white_percentage_threshold=app_config.geometry.capture_classifier_white_percentage_threshold,
+        enabled=app_config.geometry.capture_classifier_enabled
+    )
+    return PreprocessingNormalizer(
+        capture_classifier=capture_classifier,
+        pdf_config=app_config.pdf
+    )
 
 
 class TestPreprocessingNormalizer:
     """Integration tests for PreprocessingNormalizer"""
     
-    def test_process_image_success(self):
+    def test_process_image_success(self, app_config):
         """Test processing a single image successfully"""
-        normalizer = PreprocessingNormalizer()
+        # Utilise la VRAIE configuration pour les tests d'intégration
+        normalizer = create_preprocessing_normalizer(app_config)
         
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create a test image
@@ -45,9 +63,9 @@ class TestPreprocessingNormalizer:
             metadata_path = Path(output_path).with_suffix('.json')
             assert os.path.exists(metadata_path)
     
-    def test_process_image_nonexistent(self):
+    def test_process_image_nonexistent(self, app_config):
         """Test processing a non-existent image"""
-        normalizer = PreprocessingNormalizer()
+        normalizer = create_preprocessing_normalizer(app_config)
         
         with tempfile.TemporaryDirectory() as tmpdir:
             input_path = os.path.join(tmpdir, "nonexistent.png")
@@ -56,9 +74,9 @@ class TestPreprocessingNormalizer:
             with pytest.raises(ImageProcessingError):
                 normalizer.process(input_path, output_path)
     
-    def test_process_batch_images(self):
+    def test_process_batch_images(self, app_config):
         """Test processing a batch of images"""
-        normalizer = PreprocessingNormalizer()
+        normalizer = create_preprocessing_normalizer(app_config)
         
         with tempfile.TemporaryDirectory() as tmpdir:
             input_dir = os.path.join(tmpdir, "input")
@@ -83,9 +101,9 @@ class TestPreprocessingNormalizer:
                 output_path = os.path.join(output_dir, f"test_{i}.png")
                 assert os.path.exists(output_path)
     
-    def test_process_batch_empty_directory(self):
+    def test_process_batch_empty_directory(self, app_config):
         """Test processing an empty directory"""
-        normalizer = PreprocessingNormalizer()
+        normalizer = create_preprocessing_normalizer(app_config)
         
         with tempfile.TemporaryDirectory() as tmpdir:
             input_dir = os.path.join(tmpdir, "input")
@@ -96,9 +114,9 @@ class TestPreprocessingNormalizer:
             
             assert results == []
     
-    def test_process_pdf(self):
+    def test_process_pdf(self, app_config):
         """Test processing a PDF file from fixtures"""
-        normalizer = PreprocessingNormalizer()
+        normalizer = create_preprocessing_normalizer(app_config)
         
         # Use PDF from fixtures directory
         fixtures_dir = Path(__file__).parent.parent / "fixtures"
@@ -128,9 +146,9 @@ class TestPreprocessingNormalizer:
             metadata_path = Path(output_path).with_suffix('.json')
             assert os.path.exists(metadata_path)
     
-    def test_process_creates_metadata_file(self):
+    def test_process_creates_metadata_file(self, app_config):
         """Test that process() creates a metadata JSON file"""
-        normalizer = PreprocessingNormalizer()
+        normalizer = create_preprocessing_normalizer(app_config)
         
         with tempfile.TemporaryDirectory() as tmpdir:
             input_path = os.path.join(tmpdir, "test.png")
@@ -153,9 +171,9 @@ class TestPreprocessingNormalizer:
             assert 'capture_type' in metadata
             assert 'processing_time' in metadata
     
-    def test_process_batch_with_mixed_files(self):
+    def test_process_batch_with_mixed_files(self, app_config):
         """Test process_batch() with mixed image types"""
-        normalizer = PreprocessingNormalizer()
+        normalizer = create_preprocessing_normalizer(app_config)
         
         with tempfile.TemporaryDirectory() as tmpdir:
             input_dir = os.path.join(tmpdir, "input")
@@ -173,9 +191,9 @@ class TestPreprocessingNormalizer:
             assert len(results) == 3
             assert all(r.status == 'success' for r in results)
     
-    def test_process_batch_handles_errors_gracefully(self):
+    def test_process_batch_handles_errors_gracefully(self, app_config):
         """Test that process_batch() handles errors gracefully"""
-        normalizer = PreprocessingNormalizer()
+        normalizer = create_preprocessing_normalizer(app_config)
         
         with tempfile.TemporaryDirectory() as tmpdir:
             input_dir = os.path.join(tmpdir, "input")

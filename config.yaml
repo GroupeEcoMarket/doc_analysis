@@ -108,31 +108,7 @@ pdf:
 
 qa:
   # Quality Assurance thresholds for flagging potential issues
-  # ⚠️ NOTE: Ces valeurs sont REDONDANTES et ne sont plus utilisées par le code.
-  # Le QADetector utilise maintenant directement geometry.* comme source unique de vérité.
-  # Ces valeurs sont conservées uniquement pour référence/compatibilité.
-  # Pour modifier les seuils, utilisez les paramètres dans geometry.* :
-  # - geometry.orientation.min_confidence (au lieu de qa.flags.low_confidence_orientation)
-  # - geometry.crop.max_margin_ratio (au lieu de qa.flags.overcrop_risk)
-  # - geometry.quality.min_contrast (au lieu de qa.flags.low_contrast)
-  # - geometry.quality.min_resolution_width (au lieu de qa.flags.too_small_width)
-  # - geometry.quality.min_resolution_height (au lieu de qa.flags.too_small_height)
-  flags:
-    # Threshold for flagging low confidence orientation detection.
-    # DEPRECATED: Utilisez geometry.orientation.min_confidence
-    low_confidence_orientation: 0.70
-    # Threshold for flagging potential overcrop risk (as percentage of edge).
-    # DEPRECATED: Utilisez geometry.crop.max_margin_ratio
-    overcrop_risk: 0.08
-    # Threshold for flagging low contrast after enhancement.
-    # DEPRECATED: Utilisez geometry.quality.min_contrast
-    low_contrast: 50
-    # Threshold for flagging images that are too small (width).
-    # DEPRECATED: Utilisez geometry.quality.min_resolution_width
-    too_small_width: 1200
-    # Threshold for flagging images that are too small (height).
-    # DEPRECATED: Utilisez geometry.quality.min_resolution_height
-    too_small_height: 1600
+  # if they are not directly tied to the geometry parameters.
 
 # ==========================================
 # COLOMETRY NORMALIZATION

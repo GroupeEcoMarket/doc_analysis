@@ -10,7 +10,10 @@ from typing import Annotated
 
 from fastapi import Depends
 
-from src.utils.config_loader import get_config, Config, GeometryConfig, QAConfig, PDFConfig
+from src.utils.config_loader import (
+    get_config, Config, GeometryConfig, QAConfig, PDFConfig,
+    PerformanceConfig, OutputConfig
+)
 from src.pipeline.preprocessing import PreprocessingNormalizer
 from src.pipeline.geometry import GeometryNormalizer
 from src.pipeline.colometry import ColometryNormalizer
@@ -79,6 +82,36 @@ def get_pdf_config(
     return app_config.pdf
 
 
+def get_performance_config(
+    app_config: Annotated[Config, Depends(get_app_config)]
+) -> PerformanceConfig:
+    """
+    Récupère la configuration de performance.
+    
+    Args:
+        app_config: Configuration de l'application (injectée)
+        
+    Returns:
+        PerformanceConfig: Configuration de performance
+    """
+    return app_config.performance
+
+
+def get_output_config(
+    app_config: Annotated[Config, Depends(get_app_config)]
+) -> OutputConfig:
+    """
+    Récupère la configuration de sortie.
+    
+    Args:
+        app_config: Configuration de l'application (injectée)
+        
+    Returns:
+        OutputConfig: Configuration de sortie
+    """
+    return app_config.output
+
+
 # ==========================================
 # Service Dependencies
 # ==========================================
@@ -119,21 +152,27 @@ def get_preprocessing_normalizer(
     return PreprocessingNormalizer(capture_classifier=capture_classifier, pdf_config=pdf_config)
 
 
-@lru_cache()
-def get_model_registry() -> ModelRegistry:
+def get_model_registry(
+    perf_config: Annotated[PerformanceConfig, Depends(get_performance_config)]
+) -> ModelRegistry:
     """
-    Récupère le registre de modèles (singleton).
-    Cette fonction est mise en cache pour partager le registre entre toutes les requêtes.
+    Récupère le registre de modèles.
+    Le registre est créé avec la configuration de performance injectée.
     
+    Args:
+        perf_config: Configuration de performance (injectée)
+        
     Returns:
         ModelRegistry: Registre de modèles
     """
-    return ModelRegistry()
+    return ModelRegistry(lazy_load=perf_config.lazy_load_models)
 
 
 def get_geometry_normalizer(
     geo_config: Annotated[GeometryConfig, Depends(get_geometry_config)],
     qa_config: Annotated[QAConfig, Depends(get_qa_config)],
+    perf_config: Annotated[PerformanceConfig, Depends(get_performance_config)],
+    output_config: Annotated[OutputConfig, Depends(get_output_config)],
     model_registry: Annotated[ModelRegistry, Depends(get_model_registry)]
 ) -> GeometryNormalizer:
     """
@@ -142,6 +181,8 @@ def get_geometry_normalizer(
     Args:
         geo_config: Configuration géométrique (injectée)
         qa_config: Configuration QA (injectée)
+        perf_config: Configuration de performance (injectée)
+        output_config: Configuration de sortie (injectée)
         model_registry: Registre de modèles (injecté)
         
     Returns:
@@ -150,6 +191,8 @@ def get_geometry_normalizer(
     return GeometryNormalizer(
         geo_config=geo_config,
         qa_config=qa_config,
+        perf_config=perf_config,
+        output_config=output_config,
         model_registry=model_registry
     )
 

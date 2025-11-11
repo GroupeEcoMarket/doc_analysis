@@ -46,13 +46,16 @@ async def health():
 
 if __name__ == "__main__":
     import uvicorn
-    from src.utils.config import get_config
+    import os
+    from dotenv import load_dotenv
     
-    config = get_config()
+    # Charger les variables d'environnement depuis .env
+    load_dotenv()
+    
     uvicorn.run(
         app,
-        host=config.get("API_HOST", "0.0.0.0"),
-        port=int(config.get("API_PORT", 8000)),
-        reload=config.get("API_DEBUG", False)
+        host=os.getenv("API_HOST", "0.0.0.0"),
+        port=int(os.getenv("API_PORT", 8000)),
+        reload=os.getenv("API_DEBUG", "False").lower() == "true"
     )
 

@@ -11,7 +11,7 @@ from pathlib import Path
 
 from src.classification.feature_engineering import FeatureEngineer
 from src.pipeline.models import FeaturesOutput
-from src.utils.config_loader import get_config, Config
+from src.utils.config_loader import Config
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -27,30 +27,25 @@ class DocumentClassifier:
     
     def __init__(
         self,
+        app_config: Config,
         model_path: Optional[str] = None,
         semantic_model_name: Optional[str] = None,
-        min_confidence: Optional[float] = None,
-        app_config: Optional[Config] = None
+        min_confidence: Optional[float] = None
     ):
         """
         Initialise le classifieur de documents.
         
         Args:
+            app_config: Configuration de l'application (injectée via DI, obligatoire)
             model_path: Chemin vers le modèle ML sauvegardé (joblib).
                       Si None, sera chargé depuis config.yaml.
             semantic_model_name: Nom du modèle sentence-transformers à utiliser.
                                Si None, sera chargé depuis config.yaml.
             min_confidence: Seuil de confiance minimum pour filtrer les lignes OCR.
                           Si None, sera chargé depuis config.yaml.
-            app_config: Configuration de l'application (injectée via DI).
-                       Si None, charge la config depuis config.yaml (pour compatibilité).
         """
         # Charger la configuration
-        if app_config is not None:
-            config_dict = app_config.get('classification', {})
-        else:
-            config_obj = get_config()
-            config_dict = config_obj.get('classification', {})
+        config_dict = app_config.get('classification', {})
         
         # Utiliser les paramètres fournis ou ceux de la config
         self.model_path = model_path or config_dict.get('model_path', 'models/document_classifier.joblib')
@@ -88,17 +83,12 @@ class DocumentClassifier:
             project_root = Path(__file__).parent.parent.parent
             model_path = project_root / model_path
         
-        if not model_path.exists():
-            raise FileNotFoundError(
-                f"Modèle de classification introuvable: {model_path}\n"
-                f"Veuillez entraîner et sauvegarder un modèle à cet emplacement."
-            )
-        
         try:
             # Charger le modèle avec joblib
             # Le modèle peut être :
             # - Un modèle seul (sklearn, lightgbm, etc.)
             # - Un dict avec 'model' et 'class_names' (recommandé)
+            # Pattern EAFP : on essaie directement, on attrape l'exception si nécessaire
             loaded_data = joblib.load(model_path)
             
             if isinstance(loaded_data, dict):
@@ -120,7 +110,13 @@ class DocumentClassifier:
             logger.info(f"Modèle de classification chargé depuis: {model_path}")
             if self.class_names:
                 logger.info(f"Classes disponibles: {', '.join(self.class_names)}")
-        
+                
+        except FileNotFoundError:
+            # Pattern EAFP : on attrape FileNotFoundError directement depuis joblib.load
+            raise FileNotFoundError(
+                f"Modèle de classification introuvable: {model_path}\n"
+                f"Veuillez entraîner et sauvegarder un modèle à cet emplacement."
+            )
         except Exception as e:
             raise ValueError(
                 f"Impossible de charger le modèle depuis {model_path}: {e}"

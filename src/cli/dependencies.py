@@ -8,7 +8,10 @@ for CLI commands, following the same pattern as the API layer.
 from functools import lru_cache
 from typing import Optional
 
-from src.utils.config_loader import get_config, Config, GeometryConfig, QAConfig
+from src.utils.config_loader import (
+    get_config, Config, GeometryConfig, QAConfig, 
+    PerformanceConfig, OutputConfig, PDFConfig
+)
 from src.pipeline.preprocessing import PreprocessingNormalizer
 from src.pipeline.geometry import GeometryNormalizer
 from src.pipeline.colometry import ColometryNormalizer
@@ -59,6 +62,45 @@ def get_qa_config(app_config: Config) -> QAConfig:
     return app_config.qa
 
 
+def get_performance_config(app_config: Config) -> PerformanceConfig:
+    """
+    Récupère la configuration de performance.
+    
+    Args:
+        app_config: Configuration de l'application
+        
+    Returns:
+        PerformanceConfig: Configuration de performance
+    """
+    return app_config.performance
+
+
+def get_output_config(app_config: Config) -> OutputConfig:
+    """
+    Récupère la configuration de sortie.
+    
+    Args:
+        app_config: Configuration de l'application
+        
+    Returns:
+        OutputConfig: Configuration de sortie
+    """
+    return app_config.output
+
+
+def get_pdf_config(app_config: Config) -> PDFConfig:
+    """
+    Récupère la configuration PDF.
+    
+    Args:
+        app_config: Configuration de l'application
+        
+    Returns:
+        PDFConfig: Configuration PDF
+    """
+    return app_config.pdf
+
+
 # ==========================================
 # Service Dependencies
 # ==========================================
@@ -94,26 +136,31 @@ def get_preprocessing_normalizer(
     Returns:
         PreprocessingNormalizer: Instance du normaliseur
     """
+    app_config = get_app_config(config_path)
+    
     if capture_classifier is None:
-        app_config = get_app_config(config_path)
         geo_config = get_geometry_config(app_config)
         capture_classifier = get_capture_classifier(geo_config)
     
     # Récupérer la configuration PDF
-    app_config = get_app_config(config_path)
-    pdf_config = app_config.pdf
+    pdf_config = get_pdf_config(app_config)
     
     return PreprocessingNormalizer(capture_classifier=capture_classifier, pdf_config=pdf_config)
 
 
-def get_model_registry() -> ModelRegistry:
+def get_model_registry(config_path: Optional[str] = None) -> ModelRegistry:
     """
     Crée et retourne un registre de modèles.
     
+    Args:
+        config_path: Chemin vers le fichier de configuration (optionnel)
+        
     Returns:
         ModelRegistry: Instance du registre de modèles
     """
-    return ModelRegistry()
+    app_config = get_app_config(config_path)
+    perf_config = get_performance_config(app_config)
+    return ModelRegistry(lazy_load=perf_config.lazy_load_models)
 
 
 def get_geometry_normalizer(
@@ -131,11 +178,15 @@ def get_geometry_normalizer(
     app_config = get_app_config(config_path)
     geo_config = get_geometry_config(app_config)
     qa_config = get_qa_config(app_config)
-    model_registry = get_model_registry()
+    perf_config = get_performance_config(app_config)
+    output_config = get_output_config(app_config)
+    model_registry = get_model_registry(config_path)
     
     return GeometryNormalizer(
         geo_config=geo_config,
         qa_config=qa_config,
+        perf_config=perf_config,
+        output_config=output_config,
         model_registry=model_registry
     )
 

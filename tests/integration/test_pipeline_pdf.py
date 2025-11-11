@@ -34,13 +34,37 @@ def test_pdf_to_images():
     assert images[0].shape[2] == 3  # Doit être une image BGR
 
 
-def test_geometry_normalizer_with_pdf():
+def test_geometry_normalizer_with_pdf(app_config):
     """
     Teste l'enchaînement complet : Preprocessing (PDF->Image) -> Geometry.
+    
+    Utilise la VRAIE configuration pour s'assurer que l'application
+    fonctionne correctement avec sa configuration réelle.
     """
-    # 1. Initialiser les normaliseurs
-    preprocessor = PreprocessingNormalizer()
-    geometry_normalizer = GeometryNormalizer()
+    from src.utils.capture_classifier import CaptureClassifier
+    from src.models.registry import ModelRegistry
+    
+    # 1. Initialiser les normaliseurs avec la vraie configuration
+    capture_classifier = CaptureClassifier(
+        white_level_threshold=app_config.geometry.capture_classifier_white_level_threshold,
+        white_percentage_threshold=app_config.geometry.capture_classifier_white_percentage_threshold,
+        enabled=app_config.geometry.capture_classifier_enabled
+    )
+    
+    preprocessor = PreprocessingNormalizer(
+        capture_classifier=capture_classifier,
+        pdf_config=app_config.pdf
+    )
+    
+    model_registry = ModelRegistry(lazy_load=app_config.performance.lazy_load_models)
+    
+    geometry_normalizer = GeometryNormalizer(
+        geo_config=app_config.geometry,
+        qa_config=app_config.qa,
+        perf_config=app_config.performance,
+        output_config=app_config.output,
+        model_registry=model_registry
+    )
     
     # 2. Préparer les répertoires temporaires
     with tempfile.TemporaryDirectory() as tmpdir:

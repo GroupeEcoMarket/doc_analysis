@@ -151,15 +151,22 @@ class Config:
         )
     
     def _load_qa_config(self) -> QAConfig:
-        """Charge la configuration QA"""
-        qa = self._config_data.get('qa', {}).get('flags', {})
+        """
+        Charge la configuration QA.
+        """
+        # Récupérer les valeurs de geometry (source unique de vérité)
+        geo = self._config_data.get('geometry', {})
+        geo_orientation = geo.get('orientation', {})
+        geo_crop = geo.get('crop', {})
+        geo_quality = geo.get('quality', {})
         
+        # Utiliser TOUJOURS les valeurs de geometry (la section qa.* est ignorée)
         return QAConfig(
-            low_confidence_orientation=qa.get('low_confidence_orientation', 0.70),
-            overcrop_risk=qa.get('overcrop_risk', 0.08),
-            low_contrast=qa.get('low_contrast', 50),
-            too_small_width=qa.get('too_small_width', 1200),
-            too_small_height=qa.get('too_small_height', 1600)
+            low_confidence_orientation=geo_orientation.get('min_confidence', 0.70),
+            overcrop_risk=geo_crop.get('max_margin_ratio', 0.08),
+            low_contrast=geo_quality.get('min_contrast', 50),
+            too_small_width=geo_quality.get('min_resolution_width', 1200),
+            too_small_height=geo_quality.get('min_resolution_height', 1600)
         )
     
     def _load_performance_config(self) -> PerformanceConfig:
@@ -186,15 +193,26 @@ class Config:
         )
     
     def get(self, key: str, default: Any = None) -> Any:
-        """Récupère une valeur de configuration par clé"""
+        """
+        Récupère une valeur de configuration par clé (support des clés imbriquées).
+        
+        Args:
+            key: Clé de configuration (ex: 'features.ocr.enabled')
+            default: Valeur par défaut si la clé n'existe pas
+            
+        Returns:
+            Valeur de configuration ou valeur par défaut
+        """
         keys = key.split('.')
         value = self._config_data
         
         for k in keys:
             if isinstance(value, dict):
-                value = value.get(k, default)
+                value = value.get(k)  # On ne met pas de valeur par défaut ici
+                if value is None:  # On vérifie si la clé n'a pas été trouvée
+                    return default  # Et on sort immédiatement
             else:
-                return default
+                return default  # La clé parente n'était pas un dictionnaire
         
         return value if value is not None else default
     

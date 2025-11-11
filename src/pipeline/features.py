@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 
 from src.utils.ocr_engines import PaddleOCREngine
-from src.utils.config_loader import get_config, Config
+from src.utils.config_loader import Config
 from src.pipeline.models import FeaturesOutput, OCRLine, CheckboxDetection
 from src.utils.file_handler import ensure_dir, get_files, get_output_path
 
@@ -23,32 +23,15 @@ class FeatureExtractor:
     - Autres features à définir
     """
     
-    def __init__(
-        self, 
-        app_config: Optional[Config] = None,
-        config: Optional[Dict[str, Any]] = None
-    ) -> None:
+    def __init__(self, app_config: Config) -> None:
         """
         Initialise l'extracteur de features
         
         Args:
-            app_config: Configuration de l'application (injectée via DI).
-                       Si None, charge la config depuis config.yaml (pour compatibilité).
-            config: Configuration optionnelle (dict). 
-                   Si app_config est fourni, config est ignoré.
-                   Si les deux sont None, charge depuis config.yaml (pour compatibilité).
+            app_config: Configuration de l'application (injectée via DI, obligatoire)
         """
-        # Priorité: app_config (injection de dépendances) > config (dict) > get_config() (fallback)
-        if app_config is not None:
-            # Extraire la section features de la config injectée
-            self.config = app_config.get('features', {})
-        elif config is not None:
-            # Fallback pour compatibilité avec l'ancien code
-            self.config = config
-        else:
-            # Fallback final: charger depuis config.yaml
-            config_obj = get_config()
-            self.config = config_obj.get('features', {})
+        # Extraire la section features de la config injectée
+        self.config = app_config.get('features', {})
         
         # Initialiser le moteur OCR si activé
         self.ocr_engine: Optional[PaddleOCREngine] = None

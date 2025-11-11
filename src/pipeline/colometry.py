@@ -6,7 +6,7 @@ Normalise les documents par colométrie (analyse des colonnes)
 from typing import Dict, List, Optional, Any, Union
 import time
 
-from src.utils.config_loader import get_config, Config
+from src.utils.config_loader import Config
 from src.pipeline.models import ColometryOutput
 
 
@@ -15,37 +15,15 @@ class ColometryNormalizer:
     Normalise les documents en analysant et standardisant la structure colométrique
     """
     
-    def __init__(
-        self,
-        app_config: Optional[Config] = None,
-        config: Optional[Union[Dict[str, Any], str]] = None
-    ) -> None:
+    def __init__(self, app_config: Config) -> None:
         """
         Initialise le normaliseur colométrique
         
         Args:
-            app_config: Configuration de l'application (injectée via DI).
-                       Si None, charge la config depuis config.yaml (pour compatibilité).
-            config: Configuration optionnelle (dict ou chemin de fichier).
-                   Si app_config est fourni, config est ignoré.
-                   Si les deux sont None, charge depuis config.yaml (pour compatibilité).
+            app_config: Configuration de l'application (injectée via DI, obligatoire)
         """
-        # Priorité: app_config (injection de dépendances) > config (dict/str) > get_config() (fallback)
-        if app_config is not None:
-            # Extraire la section colometry de la config injectée
-            self.config: Dict[str, Any] = app_config.get('colometry', {})
-        elif config is not None:
-            # Si config est un chemin de fichier (str), charger la config
-            if isinstance(config, str):
-                config_obj = get_config(config)
-                self.config = config_obj.get('colometry', {})
-            else:
-                # config est un dict
-                self.config = config
-        else:
-            # Fallback final: charger depuis config.yaml
-            config_obj = get_config()
-            self.config = config_obj.get('colometry', {})
+        # Extraire la section colometry de la config injectée
+        self.config: Dict[str, Any] = app_config.get('colometry', {})
     
     def process(self, input_path: str, output_path: str) -> ColometryOutput:
         """

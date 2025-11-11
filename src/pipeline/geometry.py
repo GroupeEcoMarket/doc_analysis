@@ -16,7 +16,7 @@ from src.utils.transform_handler import (
     TransformSequence, Transform, save_transforms, get_transform_file_path
 )
 from src.utils.qa_flags import QADetector, QAFlags, save_qa_flags
-from src.utils.config_loader import get_config, GeometryConfig, QAConfig, PerformanceConfig, OutputConfig
+from src.utils.config_loader import GeometryConfig, QAConfig, PerformanceConfig, OutputConfig
 from src.utils.logger import get_logger
 from src.utils.exceptions import GeometryError, ModelLoadingError, ImageProcessingError
 from src.pipeline.models import GeometryOutput, CropMetadata, DeskewMetadata
@@ -336,47 +336,27 @@ class GeometryNormalizer:
     
     def __init__(
         self,
-        geo_config: Optional[GeometryConfig] = None,
-        qa_config: Optional[QAConfig] = None,
-        perf_config: Optional[PerformanceConfig] = None,
-        output_config: Optional[OutputConfig] = None,
-        model_registry: Optional["ModelRegistry"] = None
+        geo_config: GeometryConfig,
+        qa_config: QAConfig,
+        perf_config: PerformanceConfig,
+        output_config: OutputConfig,
+        model_registry: "ModelRegistry"
     ):
         """
         Initialise le normaliseur géométrique.
         
         Args:
-            geo_config: Configuration géométrique (injectée via DI).
-                       Si None, charge la config depuis config.yaml (pour compatibilité).
-            qa_config: Configuration QA (injectée via DI).
-                      Si None, charge la config depuis config.yaml (pour compatibilité).
-            perf_config: Configuration de performance (injectée via DI).
-                        Si None, charge la config depuis config.yaml (pour compatibilité).
-            output_config: Configuration de sortie (injectée via DI).
-                          Si None, charge la config depuis config.yaml (pour compatibilité).
-            model_registry: Registre de modèles (injecté via DI).
-                          Si None, crée un registre par défaut (pour compatibilité).
+            geo_config: Configuration géométrique (injectée via DI, obligatoire)
+            qa_config: Configuration QA (injectée via DI, obligatoire)
+            perf_config: Configuration de performance (injectée via DI, obligatoire)
+            output_config: Configuration de sortie (injectée via DI, obligatoire)
+            model_registry: Registre de modèles (injecté via DI, obligatoire)
         """
-        # Charger la configuration si non fournie (fallback pour compatibilité)
-        if geo_config is None or qa_config is None or perf_config is None or output_config is None:
-            app_config = get_config()
-            self.geo_config = geo_config or app_config.geometry
-            self.qa_config = qa_config or app_config.qa
-            self.perf_config = perf_config or app_config.performance
-            self.output_config = output_config or app_config.output
-        else:
-            self.geo_config = geo_config
-            self.qa_config = qa_config
-            self.perf_config = perf_config
-            self.output_config = output_config
-        
-        # Registre de modèles (injection de dépendances)
-        if model_registry is None:
-            from src.models.registry import ModelRegistry
-            # Passer lazy_load_models au ModelRegistry
-            self.model_registry = ModelRegistry(lazy_load=self.perf_config.lazy_load_models)
-        else:
-            self.model_registry = model_registry
+        self.geo_config = geo_config
+        self.qa_config = qa_config
+        self.perf_config = perf_config
+        self.output_config = output_config
+        self.model_registry = model_registry
         
         # Charger les paramètres directement depuis la config
         self.crop_threshold = self.geo_config.crop_min_area_ratio

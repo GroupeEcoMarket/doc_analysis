@@ -13,7 +13,7 @@ import time
 from src.utils.file_handler import ensure_dir, get_files, get_output_path
 from src.utils.pdf_handler import is_pdf, pdf_to_images
 from src.utils.capture_classifier import CaptureClassifier
-from src.utils.config_loader import get_config, PDFConfig, GeometryConfig
+from src.utils.config_loader import PDFConfig
 from src.utils.image_enhancer import enhance_contrast_clahe
 from src.utils.logger import get_logger
 from src.utils.exceptions import PreprocessingError, ImageProcessingError
@@ -30,37 +30,18 @@ class PreprocessingNormalizer:
 
     def __init__(
         self, 
-        capture_classifier: Optional[CaptureClassifier] = None,
-        pdf_config: Optional[PDFConfig] = None
+        capture_classifier: CaptureClassifier,
+        pdf_config: PDFConfig
     ):
         """
         Initialise le normaliseur de prétraitement.
         
         Args:
-            capture_classifier: Classificateur de capture (injecté via DI).
-                              Si None, crée un classificateur avec la config par défaut
-                              (pour compatibilité avec l'ancien code).
-            pdf_config: Configuration PDF (injectée via DI).
-                       Si None, charge depuis config.yaml (pour compatibilité).
+            capture_classifier: Classificateur de capture (injecté via DI, obligatoire)
+            pdf_config: Configuration PDF (injectée via DI, obligatoire)
         """
-        if capture_classifier is None:
-            # Fallback pour compatibilité : charger la config si non fournie
-            app_config = get_config()
-            geo_config = app_config.geometry
-            self.capture_classifier = CaptureClassifier(
-                white_level_threshold=geo_config.capture_classifier_white_level_threshold,
-                white_percentage_threshold=geo_config.capture_classifier_white_percentage_threshold,
-                enabled=geo_config.capture_classifier_enabled
-            )
-        else:
-            self.capture_classifier = capture_classifier
-        
-        # Charger la configuration PDF si non fournie
-        if pdf_config is None:
-            app_config = get_config()
-            self.pdf_config = app_config.pdf
-        else:
-            self.pdf_config = pdf_config
+        self.capture_classifier = capture_classifier
+        self.pdf_config = pdf_config
 
     def process(self, input_path: str, output_path: str) -> PreprocessingOutput:
         """

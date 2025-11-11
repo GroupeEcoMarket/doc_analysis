@@ -13,6 +13,7 @@ import tempfile
 import joblib
 
 from src.api.app import app
+from src.api.dependencies import get_feature_extractor
 
 
 @pytest.fixture(scope="session")
@@ -103,8 +104,30 @@ def mock_classifier_model(tmp_path):
 class TestClassificationEndpoint:
     """Tests pour l'endpoint /api/v1/classify"""
     
-    def test_classify_endpoint_exists(self, client):
+    @patch('src.classification.feature_engineering.SentenceTransformer')
+    @patch('src.classification.classifier_service.joblib.load')
+    def test_classify_endpoint_exists(
+        self,
+        mock_joblib_load,
+        mock_sentence_transformer_class,
+        client
+    ):
         """Test que l'endpoint existe et répond"""
+        # Mock SentenceTransformer pour éviter les appels réseau
+        mock_st_model = Mock()
+        mock_st_model.encode.return_value = np.random.rand(384).astype(np.float32)
+        mock_st_model.get_sentence_embedding_dimension.return_value = 384
+        mock_sentence_transformer_class.return_value = mock_st_model
+        
+        # Mock joblib.load pour éviter de charger un vrai modèle
+        mock_model = Mock()
+        mock_model.predict.return_value = np.array([0])
+        mock_model.predict_proba.return_value = np.array([[0.9, 0.1]])
+        mock_joblib_load.return_value = {
+            'model': mock_model,
+            'class_names': ['Attestation_CEE', 'Facture']
+        }
+        
         # Créer une image de test simple
         img = np.ones((100, 100, 3), dtype=np.uint8) * 255
         _, img_encoded = cv2.imencode('.png', img)
@@ -117,17 +140,39 @@ class TestClassificationEndpoint:
         # L'endpoint doit exister (même si la classification n'est pas activée)
         assert response.status_code in [200, 503, 500]
     
-    @patch('src.api.dependencies.get_document_classifier')
-    @patch('src.api.dependencies.get_feature_extractor')
+    @patch('src.classification.feature_engineering.SentenceTransformer')
+    @patch('src.classification.classifier_service.joblib.load')
     def test_classify_with_mock(
         self,
-        mock_get_feature_extractor,
-        mock_get_classifier,
+        mock_joblib_load,
+        mock_sentence_transformer_class,
         client,
         sample_image
     ):
-        """Test de classification avec mocks"""
-        # Mock du feature extractor
+        """
+        Test de classification en utilisant dependency_overrides.
+        
+        Cette approche est plus propre que le patching car elle utilise
+        les mécanismes intégrés de FastAPI et évite les problèmes de cache.
+        """
+        # --- Configuration des Mocks ---
+        # Mock SentenceTransformer pour éviter les appels réseau
+        mock_st_model = Mock()
+        mock_st_model.encode.return_value = np.random.rand(384).astype(np.float32)
+        mock_st_model.get_sentence_embedding_dimension.return_value = 384
+        mock_sentence_transformer_class.return_value = mock_st_model
+        
+        # Mock joblib.load pour mocker le modèle interne
+        # L'API appelle classifier.predict() qui utilise model.predict_proba() pour calculer confidence
+        mock_model = Mock()
+        mock_model.predict.return_value = np.array([0])  # Classe 0 = Attestation_CEE
+        mock_model.predict_proba.return_value = np.array([[0.92, 0.08]])  # Probabilités pour 2 classes
+        mock_joblib_load.return_value = {
+            'model': mock_model,
+            'class_names': ['Attestation_CEE', 'Facture']
+        }
+        
+        # Mock du Feature Extractor
         mock_extractor = Mock()
         mock_extractor.extract_ocr.return_value = [
             {
@@ -136,38 +181,60 @@ class TestClassificationEndpoint:
                 'bounding_box': [100, 200, 500, 250]
             }
         ]
-        mock_get_feature_extractor.return_value = mock_extractor
         
-        # Mock du classifier
-        mock_classifier = Mock()
-        mock_classifier.predict.return_value = {
-            'document_type': 'Attestation_CEE',
-            'confidence': 0.92
-        }
-        mock_get_classifier.return_value = mock_classifier
+        # --- Override de la Dépendance ---
+        # On dit à FastAPI : "Pour ce test, quand tu vois get_feature_extractor, utilise cette fonction lambda à la place"
+        app.dependency_overrides[get_feature_extractor] = lambda: mock_extractor
         
-        # Encoder l'image
-        _, img_encoded = cv2.imencode('.png', sample_image)
-        
-        response = client.post(
-            "/api/v1/classify",
-            files={"file": ("test.png", img_encoded.tobytes(), "image/png")}
-        )
-        
-        assert response.status_code == 200
-        data = response.json()
-        
-        assert data['status'] == 'success'
-        assert data['document_type'] == 'Attestation_CEE'
-        assert data['confidence'] == pytest.approx(0.92)
-        assert 'processing_time' in data
-        
-        # Vérifier que les dépendances ont été appelées
-        mock_extractor.extract_ocr.assert_called_once()
-        mock_classifier.predict.assert_called_once()
+        try:
+            # --- Exécution du Test ---
+            _, img_encoded = cv2.imencode('.png', sample_image)
+            response = client.post(
+                "/api/v1/classify",
+                files={"file": ("test.png", img_encoded.tobytes(), "image/png")}
+            )
+            
+            # --- Assertions ---
+            assert response.status_code == 200
+            data = response.json()
+            
+            assert data['status'] == 'success'
+            assert data['document_type'] == 'Attestation_CEE'
+            # La valeur doit correspondre à celle du mock (0.92)
+            assert data['confidence'] == pytest.approx(0.92)
+            assert 'processing_time' in data
+            
+            # L'assertion fonctionne maintenant car le bon mock a été injecté
+            mock_extractor.extract_ocr.assert_called_once()
+        finally:
+            # --- Nettoyage ---
+            # Il est CRUCIAL de nettoyer l'override après le test pour ne pas affecter les autres
+            app.dependency_overrides.clear()
     
-    def test_classify_invalid_file(self, client):
+    @patch('src.classification.feature_engineering.SentenceTransformer')
+    @patch('src.classification.classifier_service.joblib.load')
+    def test_classify_invalid_file(
+        self,
+        mock_joblib_load,
+        mock_sentence_transformer_class,
+        client
+    ):
         """Test avec un fichier invalide"""
+        # Mock SentenceTransformer pour éviter les appels réseau
+        mock_st_model = Mock()
+        mock_st_model.encode.return_value = np.random.rand(384).astype(np.float32)
+        mock_st_model.get_sentence_embedding_dimension.return_value = 384
+        mock_sentence_transformer_class.return_value = mock_st_model
+        
+        # Mock joblib.load pour éviter de charger un vrai modèle
+        mock_model = Mock()
+        mock_model.predict.return_value = np.array([0])
+        mock_model.predict_proba.return_value = np.array([[0.9, 0.1]])
+        mock_joblib_load.return_value = {
+            'model': mock_model,
+            'class_names': ['Attestation_CEE', 'Facture']
+        }
+        
         response = client.post(
             "/api/v1/classify",
             files={"file": ("test.txt", b"invalid content", "text/plain")}
@@ -176,8 +243,30 @@ class TestClassificationEndpoint:
         # Devrait retourner une erreur 400 ou 500
         assert response.status_code in [400, 500]
     
-    def test_classify_empty_file(self, client):
+    @patch('src.classification.feature_engineering.SentenceTransformer')
+    @patch('src.classification.classifier_service.joblib.load')
+    def test_classify_empty_file(
+        self,
+        mock_joblib_load,
+        mock_sentence_transformer_class,
+        client
+    ):
         """Test avec un fichier vide"""
+        # Mock SentenceTransformer pour éviter les appels réseau
+        mock_st_model = Mock()
+        mock_st_model.encode.return_value = np.random.rand(384).astype(np.float32)
+        mock_st_model.get_sentence_embedding_dimension.return_value = 384
+        mock_sentence_transformer_class.return_value = mock_st_model
+        
+        # Mock joblib.load pour éviter de charger un vrai modèle
+        mock_model = Mock()
+        mock_model.predict.return_value = np.array([0])
+        mock_model.predict_proba.return_value = np.array([[0.9, 0.1]])
+        mock_joblib_load.return_value = {
+            'model': mock_model,
+            'class_names': ['Attestation_CEE', 'Facture']
+        }
+        
         response = client.post(
             "/api/v1/classify",
             files={"file": ("empty.png", b"", "image/png")}

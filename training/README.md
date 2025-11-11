@@ -32,7 +32,12 @@ training/
 Utilisez `prepare_training_data.py` pour extraire les features OCR :
 
 ```bash
-poetry run python training/prepare_training_data.py training/ training_data/
+# Utiliser les chemins par défaut depuis config.yaml
+# (input: training_data/raw, output: training_data/processed)
+poetry run python training/prepare_training_data.py
+
+# Ou spécifier explicitement les répertoires
+poetry run python training/prepare_training_data.py --input-dir training/ --output-dir training_data/processed
 ```
 
 Ce script :
@@ -42,19 +47,29 @@ Ce script :
 4. Maintient la structure de dossiers
 
 **Options :**
-- `--workers N` : Nombre de processus parallèles (défaut: nombre de CPUs - 1)
-- `--config FILE` : Fichier de configuration personnalisé
+- `--input-dir PATH`: Répertoire contenant les sous-dossiers d'images par type (défaut depuis `config.yaml`: `training_data/raw`)
+- `--output-dir PATH`: Répertoire de sortie pour les fichiers JSON (défaut depuis `config.yaml`: `training_data/processed`)
+- `--workers N` ou `-w N`: Nombre de processus parallèles (défaut: `cpu_count() - 1`)
+- `--config FILE` ou `-c FILE`: Fichier de configuration personnalisé
 
 **Exemples :**
 ```bash
-# Utilisation par défaut (automatique)
-poetry run python training/prepare_training_data.py training/ training_data/
+# Utilisation par défaut (utilise les valeurs de config.yaml)
+poetry run python training/prepare_training_data.py
+
+# Spécifier uniquement le répertoire d'entrée
+poetry run python training/prepare_training_data.py --input-dir training/
 
 # Limiter à 2 workers (pour économiser la RAM)
-poetry run python training/prepare_training_data.py training/ training_data/ --workers 2
+poetry run python training/prepare_training_data.py --workers 2
 
 # Utiliser tous les CPUs
-poetry run python training/prepare_training_data.py training/ training_data/ --workers 8
+poetry run python training/prepare_training_data.py --workers 8
+
+# Spécifier des répertoires personnalisés
+poetry run python training/prepare_training_data.py \
+    --input-dir training/ \
+    --output-dir custom_output/
 ```
 
 **Performances :**
@@ -64,7 +79,7 @@ poetry run python training/prepare_training_data.py training/ training_data/ --w
 
 **Structure générée en sortie :**
 ```
-training_data/
+training_data/processed/
 ├── Type1/
 │   ├── image1.json
 │   ├── image2.json
@@ -88,7 +103,8 @@ raw_data/
 
 **Utilisation :**
 ```bash
-poetry run python training/create_dataset.py raw_data/ training_data/
+# Organiser les données dans training_data/processed (chemin par défaut pour train_classifier.py)
+poetry run python training/create_dataset.py raw_data/ training_data/processed
 ```
 
 **Options :**
@@ -115,37 +131,46 @@ Ce script :
 
 **Utilisation de base :**
 ```bash
-poetry run python training/train_classifier.py training_data/
+poetry run python training/train_classifier.py
 ```
 
 **Options principales :**
-- `--model-path PATH`: Chemin pour sauvegarder le modèle (défaut: `models/document_classifier.joblib`)
-- `--report-path PATH`: Chemin pour sauvegarder le rapport (défaut: `models/training_report.json`)
-- `--model-type TYPE`: Type de modèle (`lightgbm`, `logistic_regression`, `random_forest`)
-- `--test-size FLOAT`: Proportion des données pour le test (défaut: 0.2)
-- `--embedding-model NAME`: Modèle sentence-transformers (défaut: `antoinelouis/french-me5-base`)
-- `--min-confidence FLOAT`: Seuil de confiance OCR (défaut: 0.70)
+- `--data-dir PATH`: Répertoire contenant les données d'entraînement (sous-dossiers par type) (défaut depuis `config.yaml`: `training_data/processed`)
+- `--model-path PATH`: Chemin pour sauvegarder le modèle (défaut depuis `config.yaml`: `training_data/artifacts/document_classifier.joblib`)
+- `--report-path PATH`: Chemin pour sauvegarder le rapport (défaut depuis `config.yaml`: `training_data/artifacts/training_report.json`)
+- `--model-type TYPE`: Type de modèle (`lightgbm`, `logistic_regression`, `random_forest`) (défaut: `lightgbm`)
+- `--test-size FLOAT`: Proportion des données pour le test (défaut: `0.2`)
+- `--random-state INT`: Seed aléatoire pour la reproductibilité (défaut: `42`)
+- `--embedding-model NAME`: Modèle sentence-transformers (défaut depuis `config.yaml`: `antoinelouis/french-me5-base`)
+- `--min-confidence FLOAT`: Seuil de confiance minimum pour filtrer les lignes OCR (défaut depuis `config.yaml`: `0.70`)
+- `--workers N` ou `-w N`: Nombre de workers parallèles pour la vectorisation (défaut: `cpu_count() - 1`)
 
 **Exemples :**
 
 ```bash
-# Entraîner avec LightGBM (par défaut)
-poetry run python training/train_classifier.py training_data/
+# Entraîner avec LightGBM (par défaut, utilise les valeurs de config.yaml)
+poetry run python training/train_classifier.py
+
+# Spécifier un répertoire de données différent
+poetry run python training/train_classifier.py --data-dir training_data/
 
 # Entraîner avec LogisticRegression
-poetry run python training/train_classifier.py training_data/ --model-type logistic_regression
+poetry run python training/train_classifier.py --model-type logistic_regression
 
 # Entraîner avec RandomForest
-poetry run python training/train_classifier.py training_data/ --model-type random_forest
+poetry run python training/train_classifier.py --model-type random_forest
 
 # Personnaliser les chemins de sortie
-poetry run python training/train_classifier.py training_data/ \
+poetry run python training/train_classifier.py \
     --model-path models/my_classifier.joblib \
     --report-path models/my_report.json
 
 # Utiliser un modèle sentence-transformers différent
-poetry run python training/train_classifier.py training_data/ \
-    --embedding-model antoinelouis/french-me5-base
+poetry run python training/train_classifier.py \
+    --embedding-model sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+
+# Limiter le nombre de workers pour économiser la RAM
+poetry run python training/train_classifier.py --workers 2
 ```
 
 ## Format des Données d'Entraînement
@@ -172,10 +197,10 @@ Ce format correspond à la sortie de `src/pipeline/features.py`.
 
 ## Structure des Données d'Entraînement
 
-Le script `train_classifier.py` attend une structure de dossiers où chaque sous-dossier représente un type de document :
+Le script `train_classifier.py` attend une structure de dossiers où chaque sous-dossier représente un type de document. Par défaut, il cherche dans `training_data/processed` (configurable via `config.yaml` → `paths.training_processed_dir`) :
 
 ```
-training_data/
+training_data/processed/
 ├── Attestation_CEE/
 │   ├── doc1.json
 │   ├── doc2.json
@@ -210,6 +235,9 @@ Le rapport JSON contient :
 - Rapport de classification par classe
 - Matrice de confusion
 - Liste des classes
+- Importance des features (pour les modèles qui le supportent : LightGBM, RandomForest)
+  - Pourcentage d'importance du texte sémantique
+  - Pourcentage d'importance des features de position
 
 ## Dépendances
 

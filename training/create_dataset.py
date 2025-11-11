@@ -22,12 +22,14 @@ def organize_training_data(
     
     Structure attendue en sortie :
     training_data/
-    ├── Attestation_CEE/
-    │   ├── doc1.json
-    │   ├── doc2.json
-    │   └── ...
-    ├── Facture/
-    │   ├── doc1.json
+    ├── processed/
+    │   ├── Attestation_CEE/
+    │   │   ├── doc1.json
+    │   │   ├── doc2.json
+    │   │   └── ...
+    │   ├── Facture/
+    │   │   ├── doc1.json
+    │   │   └── ...
     │   └── ...
     └── ...
     

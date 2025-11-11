@@ -1,35 +1,50 @@
-[build-system]
-requires = ["setuptools>=45", "wheel"]
-build-backend = "setuptools.build_meta"
+# ===================================================================
+# COPIE-COLLE CE CONTENU EXACT DANS TON pyproject.toml
+# ===================================================================
 
-[project]
+# --- Section de Build System pour Poetry ---
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+# --- Section Principale de Configuration de Poetry ---
+[tool.poetry]
 name = "doc-analysis"
 version = "0.1.0"
 description = "Pipeline d'analyse de documents avec Machine Learning"
+authors = ["Axel Air <axel@ar-partners.fr>"]
 readme = "README.md"
-requires-python = ">=3.8"
-classifiers = [
-    "Development Status :: 3 - Alpha",
-    "Intended Audience :: Developers",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-]
+# La ligne cruciale qui manquait pour que `poetry install` fonctionne :
+packages = [{include = "src"}]
 
-[tool.black]
-line-length = 100
-target-version = ['py38', 'py39', 'py310', 'py311']
-include = '\.pyi?$'
+# --- Dépendances Principales ---
+[tool.poetry.dependencies]
+python = "^3.11"
+paddlepaddle = ">=3.0.0b2,<4.0.0"
+paddleocr = ">=3.3.1,<4.0.0"
+python-doctr = {extras = ["torch"], version = ">=1.0.0,<2.0.0"}
+sentence-transformers = ">=5.1.2,<6.0.0"
+onnxruntime = ">=1.23.2,<2.0.0"
+onnxtr = ">=0.8.0,<0.9.0"
+scikit-learn = ">=1.7.2,<2.0.0"
+lightgbm = ">=4.6.0,<5.0.0"
+fastapi = ">=0.121.1,<0.122.0"
+uvicorn = {extras = ["standard"], version = ">=0.38.0,<0.39.0"}
+pydantic = ">=2.12.4,<3.0.0"
+python-multipart = ">=0.0.20,<0.0.21"
+pillow = ">=12.0.0,<13.0.0"
+pymupdf = ">=1.26.6,<2.0.0"
+pdf2image = ">=1.17.0,<2.0.0"
+python-dotenv = ">=1.2.1,<2.0.0"
+click = ">=8.3.0,<9.0.0"
+tqdm = ">=4.67.1,<5.0.0"
+# Note: Les dépendances comme numpy, opencv, pyyaml seront gérées par Poetry
+# car elles sont des sous-dépendances des paquets ci-dessus.
 
-[tool.flake8]
-max-line-length = 100
-exclude = [".git", "__pycache__", "venv", "build", "dist"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-python_files = ["test_*.py"]
-python_classes = ["Test*"]
-python_functions = ["test_*"]
-
+# --- Dépendances de Développement ---
+[tool.poetry.group.dev.dependencies]
+pytest = ">=9.0.0,<10.0.0"
+pytest-cov = ">=7.0.0,<8.0.0"
+httpx = ">=0.28.1,<0.29.0"
+black = ">=25.11.0,<26.0.0"
+flake8 = ">=7.3.0,<8.0.0"

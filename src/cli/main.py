@@ -14,6 +14,7 @@ from src.cli.dependencies import (
     get_geometry_normalizer,
     get_colometry_normalizer,
     get_feature_extractor,
+    get_document_classifier,
     get_app_config
 )
 from src.utils.config_loader import Config
@@ -86,11 +87,85 @@ def features(input: str, output: str, config: Optional[str]) -> None:
 
 
 @cli.command()
+@click.option("--input", "-i", required=True, help="Répertoire d'entrée (JSON OCR)")
+@click.option("--output", "-o", required=True, help="Répertoire de sortie")
+@click.option("--config", "-c", help="Fichier de configuration")
+def classification(input: str, output: str, config: Optional[str]) -> None:
+    """Classification de type de document"""
+    import json
+    from pathlib import Path
+    from src.utils.file_handler import ensure_dir, get_files
+    
+    click.echo(f"Classification de documents: {input} -> {output}")
+    
+    try:
+        # Utiliser l'injection de dépendances
+        classifier = get_document_classifier(config_path=config)
+        
+        # Créer le répertoire de sortie
+        ensure_dir(output)
+        
+        # Parcourir les fichiers JSON d'entrée
+        json_files = get_files(input, extensions=['.json'])
+        
+        if not json_files:
+            click.echo(f"Aucun fichier JSON trouvé dans {input}")
+            return
+        
+        click.echo(f"Traitement de {len(json_files)} fichiers...")
+        
+        results = []
+        for json_file in json_files:
+            try:
+                # Charger le JSON OCR
+                with open(json_file, 'r', encoding='utf-8') as f:
+                    ocr_data = json.load(f)
+                
+                # Classifier
+                classification_result = classifier.predict(ocr_data)
+                
+                # Sauvegarder le résultat
+                output_file = Path(output) / Path(json_file).name
+                with open(output_file, 'w', encoding='utf-8') as f:
+                    json.dump(classification_result, f, indent=2, ensure_ascii=False)
+                
+                results.append({
+                    'file': str(json_file),
+                    'document_type': classification_result.get('document_type'),
+                    'confidence': classification_result.get('confidence', 0.0)
+                })
+                
+            except Exception as e:
+                click.echo(f"Erreur lors du traitement de {json_file}: {e}", err=True)
+                continue
+        
+        click.echo(f"\nTraitement terminé: {len(results)} documents classifiés")
+        
+        # Afficher un résumé
+        if results:
+            click.echo("\nRésumé:")
+            type_counts = {}
+            for result in results:
+                doc_type = result['document_type'] or 'Unknown'
+                type_counts[doc_type] = type_counts.get(doc_type, 0) + 1
+            
+            for doc_type, count in sorted(type_counts.items()):
+                click.echo(f"  {doc_type}: {count}")
+    
+    except ValueError as e:
+        click.echo(f"Erreur de configuration: {e}", err=True)
+        raise click.Abort()
+    except Exception as e:
+        click.echo(f"Erreur lors de la classification: {e}", err=True)
+        raise click.Abort()
+
+
+@cli.command()
 @click.option("--input", "-i", required=True, help="Répertoire d'entrée")
 @click.option("--output", "-o", required=True, help="Répertoire de sortie")
 @click.option("--config", "-c", help="Fichier de configuration")
 @click.option("--stages", "-s", multiple=True, 
-              type=click.Choice(["preprocessing", "colometry", "geometry", "features"]),
+              type=click.Choice(["preprocessing", "colometry", "geometry", "features", "classification"]),
               help="Étapes à exécuter (peut être répété plusieurs fois)")
 def pipeline(input: str, output: str, config: Optional[str], stages: Tuple[str, ...]) -> None:
     """Exécute le pipeline complet ou des étapes spécifiques"""
@@ -99,7 +174,7 @@ def pipeline(input: str, output: str, config: Optional[str], stages: Tuple[str, 
     
     # Si aucune étape spécifiée, exécuter toutes les étapes par défaut
     if not stages:
-        stages = ["preprocessing", "geometry", "features"]
+        stages = ["preprocessing", "geometry", "features", "classification"]
     
     # Ordre logique des étapes (pour référence)
     # preprocessing → geometry → features
@@ -141,7 +216,52 @@ def pipeline(input: str, output: str, config: Optional[str], stages: Tuple[str, 
         features_output = os.path.join(output, "features")
         os.makedirs(features_output, exist_ok=True)
         feature_extractor.process_batch(current_input, features_output)
-        # Pas besoin de mettre à jour current_input car c'est la dernière étape
+        current_input = features_output  # Mettre à jour pour la classification
+    
+    if "classification" in stages:
+        click.echo("Classification de documents...")
+        try:
+            # Utiliser l'injection de dépendances
+            classifier = get_document_classifier(config_path=config)
+            
+            import json
+            from pathlib import Path
+            from src.utils.file_handler import ensure_dir, get_files
+            
+            classification_output = os.path.join(output, "classification")
+            os.makedirs(classification_output, exist_ok=True)
+            
+            # Parcourir les fichiers JSON d'entrée
+            json_files = get_files(current_input, extensions=['.json'])
+            
+            if not json_files:
+                click.echo(f"Aucun fichier JSON trouvé dans {current_input}")
+            else:
+                click.echo(f"Traitement de {len(json_files)} fichiers...")
+                
+                for json_file in json_files:
+                    try:
+                        # Charger le JSON OCR
+                        with open(json_file, 'r', encoding='utf-8') as f:
+                            ocr_data = json.load(f)
+                        
+                        # Classifier
+                        classification_result = classifier.predict(ocr_data)
+                        
+                        # Sauvegarder le résultat
+                        output_file = Path(classification_output) / Path(json_file).name
+                        with open(output_file, 'w', encoding='utf-8') as f:
+                            json.dump(classification_result, f, indent=2, ensure_ascii=False)
+                    
+                    except Exception as e:
+                        click.echo(f"Erreur lors du traitement de {json_file}: {e}", err=True)
+                        continue
+                
+                click.echo(f"Classification terminée: {len(json_files)} documents traités")
+        
+        except ValueError as e:
+            click.echo(f"⚠️  Classification ignorée: {e}", err=True)
+            # Ne pas faire échouer le pipeline si la classification n'est pas activée
     
     click.echo("Pipeline terminé!")
 

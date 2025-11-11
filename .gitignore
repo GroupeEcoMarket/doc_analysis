@@ -67,3 +67,7 @@ models/*.pt
 models/*.h5
 !models/.gitkeep
 
+# Training data
+training_data/
+
+

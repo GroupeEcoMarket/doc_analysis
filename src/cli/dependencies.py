@@ -176,3 +176,31 @@ def get_feature_extractor(
     
     # Injecter la configuration via DI
     return FeatureExtractor(app_config=app_config)
+
+
+def get_document_classifier(
+    config_path: Optional[str] = None
+) -> "DocumentClassifier":
+    """
+    Crée et retourne un classifieur de documents.
+    
+    Args:
+        config_path: Chemin vers le fichier de configuration (optionnel)
+        
+    Returns:
+        DocumentClassifier: Instance du classifieur
+    """
+    from src.classification.classifier_service import DocumentClassifier
+    
+    app_config = get_app_config(config_path)
+    
+    # Vérifier si la classification est activée
+    classification_config = app_config.get('classification', {})
+    if not classification_config.get('enabled', False):
+        raise ValueError(
+            "La classification de documents n'est pas activée dans la configuration. "
+            "Définissez classification.enabled: true dans config.yaml"
+        )
+    
+    # Injecter la configuration via DI
+    return DocumentClassifier(app_config=app_config)

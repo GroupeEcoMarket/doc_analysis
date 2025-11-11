@@ -187,3 +187,31 @@ def get_feature_extractor(
     
     # Injecter la configuration via DI
     return FeatureExtractor(app_config=app_config)
+
+
+@lru_cache()
+def get_document_classifier(
+    app_config: Annotated[Config, Depends(get_app_config)]
+) -> "DocumentClassifier":
+    """
+    Crée et retourne un classifieur de documents (singleton).
+    Le modèle de classification est chargé une seule fois au premier appel.
+    
+    Args:
+        app_config: Configuration de l'application (injectée)
+        
+    Returns:
+        DocumentClassifier: Instance du classifieur
+    """
+    from src.classification.classifier_service import DocumentClassifier
+    
+    # Vérifier si la classification est activée
+    classification_config = app_config.get('classification', {})
+    if not classification_config.get('enabled', False):
+        raise ValueError(
+            "La classification de documents n'est pas activée dans la configuration. "
+            "Définissez classification.enabled: true dans config.yaml"
+        )
+    
+    # Injecter la configuration via DI
+    return DocumentClassifier(app_config=app_config)

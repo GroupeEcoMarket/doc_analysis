@@ -18,11 +18,13 @@ from src.api.dependencies import (
     get_preprocessing_normalizer,
     get_geometry_normalizer,
     get_app_config,
-    get_feature_extractor
+    get_feature_extractor,
+    get_document_classifier
 )
 from src.pipeline.preprocessing import PreprocessingNormalizer
 from src.pipeline.geometry import GeometryNormalizer
 from src.pipeline.features import FeatureExtractor
+from src.classification.classifier_service import DocumentClassifier
 from src.utils.logger import get_logger, get_request_id
 from src.utils.exceptions import (
     GeometryError, 
@@ -97,6 +99,7 @@ class AnalyzeResponse(BaseModel):
     qa_flags: Dict[str, Any] = Field(..., description="Quality assurance flags indicating potential issues")
     pipeline_stages: PipelineStages = Field(..., description="Status of each pipeline stage")
     temp_dirs: TempDirs = Field(..., description="Temporary directories used during processing")
+    classification: Optional[Dict[str, Any]] = Field(None, description="Document classification result (if enabled)")
 
 
 class NotImplementedResponse(BaseModel):
@@ -115,9 +118,11 @@ class OCRLineResponse(BaseModel):
     """Response model for a single OCR line"""
     text: str = Field(..., description="Le texte reconnu de la ligne")
     confidence: float = Field(..., description="Le score de confiance de la reconnaissance")
-    bounding_box: List[Tuple[int, int]] = Field(
+    bounding_box: List[float] = Field(
         ..., 
-        description="Les 4 points de la boîte englobante [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]"
+        min_length=4,
+        max_length=4,
+        description="Boîte englobante au format rectangle [x_min, y_min, x_max, y_max]"
     )
 
 
@@ -127,6 +132,15 @@ class FeaturesResponse(BaseModel):
     filename: Optional[str] = Field(None, description="Nom du fichier d'entrée")
     line_count: int = Field(..., description="Nombre de lignes de texte extraites")
     lines: List[OCRLineResponse] = Field(..., description="Liste des lignes de texte extraites")
+    processing_time: float = Field(..., description="Temps de traitement en secondes")
+
+
+class ClassificationResponse(BaseModel):
+    """Response model for document classification endpoint"""
+    status: str = Field(..., description="Statut du traitement")
+    filename: Optional[str] = Field(None, description="Nom du fichier d'entrée")
+    document_type: Optional[str] = Field(None, description="Type de document détecté")
+    confidence: float = Field(..., description="Confiance de la classification (0.0-1.0)")
     processing_time: float = Field(..., description="Temps de traitement en secondes")
 
 
@@ -628,6 +642,96 @@ async def pipeline_features(
         raise
     except Exception as e:
         logger.error(f"Erreur lors de l'extraction de features : {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur interne du serveur : {str(e)}"
+        )
+
+
+@router.post(
+    "/classify",
+    response_model=ClassificationResponse,
+    summary="Document Type Classification",
+    description="""
+    Classifie le type de document depuis une image ou un PDF.
+    
+    **Processus :**
+    1. Extrait les features OCR (via /pipeline/features)
+    2. Vectorise le document avec des embeddings multi-modaux
+    3. Classe le document avec le modèle ML entraîné
+    4. Retourne le type de document et la confiance
+    
+    **Input:**
+    - Accepts image files (PNG, JPG, JPEG, TIFF, BMP) or PDF files
+    
+    **Output:**
+    - **document_type:** Type de document détecté (ex: "Attestation_CEE", "Facture")
+    - **confidence:** Confiance de la classification (0.0-1.0)
+    - Si la confiance est en dessous du seuil configuré, document_type sera None
+    
+    **Note:** La classification doit être activée dans config.yaml (classification.enabled: true)
+    """
+)
+async def classify_document(
+    feature_extractor: Annotated[FeatureExtractor, Depends(get_feature_extractor)],
+    document_classifier: Annotated[DocumentClassifier, Depends(get_document_classifier)],
+    file: UploadFile = File(...)
+) -> ClassificationResponse:
+    """
+    Classe le type de document depuis une image ou un PDF.
+    """
+    start_time = time.time()
+    
+    try:
+        # 1. Lire le contenu du fichier
+        file_content = await file.read()
+        if not file_content:
+            raise HTTPException(status_code=400, detail="Le fichier est vide.")
+        
+        # 2. Convertir en image NumPy
+        image_np: np.ndarray
+        
+        if is_pdf(file.filename or ""):
+            # Utiliser PyMuPDF pour convertir le PDF en mémoire
+            image_np = pdf_buffer_to_image(file_content, dpi=300)
+        else:
+            # Convertir l'image directement depuis le buffer mémoire
+            image_np = cv2.imdecode(np.frombuffer(file_content, np.uint8), cv2.IMREAD_COLOR)
+            if image_np is None:
+                raise HTTPException(status_code=400, detail="Format d'image invalide ou corrompu.")
+        
+        # 3. Extraire les features OCR
+        ocr_lines = feature_extractor.extract_ocr(image_np)
+        
+        # 4. Préparer les données OCR pour la classification
+        ocr_data = {
+            'ocr_lines': ocr_lines
+        }
+        
+        # 5. Classifier le document
+        classification_result = document_classifier.predict(ocr_data)
+        
+        processing_time = time.time() - start_time
+        
+        return ClassificationResponse(
+            status="success",
+            filename=file.filename,
+            document_type=classification_result.get('document_type'),
+            confidence=classification_result.get('confidence', 0.0),
+            processing_time=processing_time
+        )
+        
+    except HTTPException:
+        raise
+    except ValueError as e:
+        # Erreur de configuration (classification non activée, modèle non trouvé, etc.)
+        logger.error(f"Erreur de configuration pour la classification : {e}", exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail=f"Service de classification non disponible : {str(e)}"
+        )
+    except Exception as e:
+        logger.error(f"Erreur lors de la classification : {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
             detail=f"Erreur interne du serveur : {str(e)}"

@@ -181,7 +181,7 @@ class FeatureExtractor:
             list: Liste des checkboxes détectées avec leur état
         """
         # TODO: Implémenter la détection de checkboxes
-        pass
+        return []  # Retourner une liste vide au lieu de None
     
     def extract_ocr(self, image: np.ndarray) -> List[Dict[str, Any]]:
         """
@@ -211,5 +211,32 @@ class FeatureExtractor:
         ]
         
         # Convertir les objets Pydantic en dictionnaires pour la sortie
-        return [line.model_dump() for line in filtered_lines]
+        # et convertir le format bounding box de quadrilatère vers rectangle
+        result = []
+        for line in filtered_lines:
+            line_dict = line.model_dump()
+            # Convertir bounding_box de [(x1,y1), (x2,y2), (x3,y3), (x4,y4)] vers [x_min, y_min, x_max, y_max]
+            if 'bounding_box' in line_dict and line_dict['bounding_box'] is not None:
+                bbox = line_dict['bounding_box']
+                try:
+                    # Si c'est déjà une liste de 4 nombres, on la garde telle quelle
+                    if len(bbox) == 4 and isinstance(bbox[0], (int, float)):
+                        pass  # Déjà au bon format
+                    else:
+                        # Convertir de liste de tuples vers rectangle
+                        all_x = [point[0] for point in bbox]
+                        all_y = [point[1] for point in bbox]
+                        line_dict['bounding_box'] = [
+                            float(min(all_x)), 
+                            float(min(all_y)), 
+                            float(max(all_x)), 
+                            float(max(all_y))
+                        ]
+                except (TypeError, IndexError, KeyError) as e:
+                    # En cas d'erreur, utiliser une bbox par défaut
+                    print(f"[WARNING] Could not convert bounding box: {bbox}, error: {e}")
+                    line_dict['bounding_box'] = [0.0, 0.0, 0.0, 0.0]
+            result.append(line_dict)
+        
+        return result
 

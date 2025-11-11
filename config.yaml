@@ -144,6 +144,33 @@ colometry:
   # Example: min_column_width: 50  # Minimum width (in pixels) for a column to be considered valid
 
 # ==========================================
+# DOCUMENT CLASSIFICATION
+# ==========================================
+
+classification:
+  # Document Type Classification
+  # Classifies documents into types (e.g., "Attestation_CEE", "Facture", etc.)
+  enabled: true  # Enable/disable document type classification
+  # Path to the trained classification model (saved with joblib).
+  # The model should be a scikit-learn compatible classifier (e.g., LGBMClassifier, LogisticRegression).
+  # If the path is relative, it will be resolved from the project root.
+  model_path: "models/document_classifier.joblib"
+  # Semantic model for feature engineering (sentence-transformers).
+  # This model is used to create semantic embeddings from OCR text.
+  # Recommended models for French: "sentence-transformers/bge-small-fr" (fast, good quality)
+  # or "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2" (multilingual, smaller)
+  embedding_model: "sentence-transformers/bge-small-fr"
+  # Minimum confidence threshold for OCR lines to be included in embeddings.
+  # Higher values (e.g., 0.85) are stricter and only use high-confidence text.
+  # Lower values (e.g., 0.60) are more lenient but may include incorrectly recognized text.
+  min_confidence: 0.70
+  # Classification confidence threshold to accept a prediction.
+  # Predictions with confidence below this threshold will be rejected or marked as uncertain.
+  # Higher values (e.g., 0.80) are stricter and only accept high-confidence classifications.
+  # Lower values (e.g., 0.50) are more lenient but may accept incorrect classifications.
+  classification_confidence_threshold: 0.60
+
+# ==========================================
 # FEATURE EXTRACTION
 # ==========================================
 

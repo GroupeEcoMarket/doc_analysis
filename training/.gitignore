@@ -1,0 +1,11 @@
+# Ignorer tous les sous-dossiers
+*/
+
+# Ignorer toutes les images PNG
+*.png
+
+# Mais garder les fichiers de premier niveau (.py, .md, __init__.py)
+!*.py
+!*.md
+!__init__.py
+

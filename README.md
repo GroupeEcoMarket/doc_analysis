@@ -27,30 +27,48 @@ Voir [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) pour plus de détails.
 
 ## Installation
 
-### 1. Créer un environnement virtuel
+### 1. Installer Poetry
+
+Si Poetry n'est pas déjà installé :
 
 ```bash
-# Windows
-python -m venv venv
-venv\Scripts\activate
+# Windows (PowerShell)
+(Invoke-WebRequest -Uri https://install.python-poetry.org -UseBasicParsing).Content | python -
 
 # Linux/Mac
-python -m venv venv
-source venv/bin/activate
+curl -sSL https://install.python-poetry.org | python3 -
 ```
 
-### 2. Installer les dépendances
+**Note** : Après l'installation, ajouter Poetry au PATH ou redémarrer le terminal. Voir la [documentation officielle](https://python-poetry.org/docs/#installation) pour plus de détails.
+
+### 2. Initialiser Poetry (si nécessaire)
+
+Si le projet n'a pas encore de fichier `pyproject.toml` configuré pour Poetry :
 
 ```bash
-pip install -r requirements.txt
+poetry init
 ```
+
+⚠️ **Attention** : Si un fichier `pyproject.toml` existe déjà, `poetry init` peut le modifier ou vous demander de le faire manuellement. Dans ce cas, il est préférable de configurer Poetry directement dans le `pyproject.toml` existant en ajoutant une section `[tool.poetry]` plutôt que d'utiliser `poetry init`.
+
+### 3. Installer les dépendances
+
+```bash
+poetry install
+```
+
+Poetry créera automatiquement un environnement virtuel et installera toutes les dépendances définies dans `pyproject.toml`.
+
+**Note** : Plus besoin de créer manuellement un environnement virtuel (`venv`) - Poetry le gère automatiquement. Vous pouvez :
+- Utiliser `poetry run` avant chaque commande (recommandé)
+- Ou activer l'environnement avec `poetry shell` pour une session interactive
 
 **Note sur les PDFs** : Le pipeline utilise PyMuPDF par défaut pour convertir les PDFs (aucune dépendance externe requise). Si vous préférez utiliser `pdf2image`, vous devrez installer poppler :
 - **Windows** : Télécharger [poppler](https://github.com/oschwartz10612/poppler-windows/releases/) et l'ajouter au PATH
 - **Linux** : `sudo apt-get install poppler-utils`
 - **Mac** : `brew install poppler`
 
-### 3. Configuration
+### 4. Configuration
 
 #### Variables d'environnement
 
@@ -104,21 +122,21 @@ copy votre_document.pdf data\input\
 
 2. **Exécuter le pipeline complet** :
 ```bash
-python -m src.cli.main pipeline --input data/input --output data/output
+poetry run python -m src.cli.main pipeline --input data/input --output data/output
 ```
 
 3. **Ou exécuter les étapes séparément** :
 ```bash
 # Étape 1: Prétraitement (amélioration contraste + classification)
-python -m src.cli.main preprocessing --input data/input --output data/processed/preprocessing
+poetry run python -m src.cli.main preprocessing --input data/input --output data/processed/preprocessing
 
 # Étape 2: Normalisation géométrique (crop, deskew, rotation)
-python -m src.cli.main geometry --input data/processed/preprocessing --output data/output/geometry
+poetry run python -m src.cli.main geometry --input data/processed/preprocessing --output data/output/geometry
 ```
 
 4. **Ou utiliser le script de test** :
 ```bash
-python test_pdf_example.py
+poetry run python test_pdf_example.py
 ```
 
 **Note** : Pour les PDFs multi-pages, chaque page sera traitée et sauvegardée avec le suffixe `_page1.png`, `_page2.png`, etc.
@@ -131,22 +149,22 @@ Exécuter une étape spécifique du pipeline :
 
 ```bash
 # Étape 1: Prétraitement (amélioration contraste + classification SCAN/PHOTO)
-python -m src.cli.main preprocessing --input data/input/ --output data/processed/preprocessing/
+poetry run python -m src.cli.main preprocessing --input data/input/ --output data/processed/preprocessing/
 
 # Étape 2: Normalisation géométrie (crop, deskew, rotation)
-python -m src.cli.main geometry --input data/processed/preprocessing/ --output data/output/geometry/
+poetry run python -m src.cli.main geometry --input data/processed/preprocessing/ --output data/output/geometry/
 
 # Normalisation colométrie (optionnel)
-python -m src.cli.main colometry --input data/input/ --output data/processed/colometry/
+poetry run python -m src.cli.main colometry --input data/input/ --output data/processed/colometry/
 
 # Extraction de features
-python -m src.cli.main features --input data/output/geometry/ --output data/output/
+poetry run python -m src.cli.main features --input data/output/geometry/ --output data/output/
 
 # Exécuter tout le pipeline (prétraitement → géométrie → features)
-python -m src.cli.main pipeline --input data/input/ --output data/output/
+poetry run python -m src.cli.main pipeline --input data/input/ --output data/output/
 
 # Exécuter des étapes spécifiques du pipeline
-python -m src.cli.main pipeline --input data/input/ --output data/output/ --stages preprocessing --stages geometry
+poetry run python -m src.cli.main pipeline --input data/input/ --output data/output/ --stages preprocessing --stages geometry
 ```
 
 **Important** : L'étape `geometry` attend maintenant la sortie de `preprocessing` en entrée. Les images doivent être prétraitées avec leurs métadonnées JSON correspondantes.
@@ -156,7 +174,7 @@ python -m src.cli.main pipeline --input data/input/ --output data/output/ --stag
 Démarrer le serveur API :
 
 ```bash
-python -m src.api.app
+poetry run python -m src.api.app
 ```
 
 L'API sera accessible sur `http://localhost:8000`
@@ -202,7 +220,7 @@ doc_analysis/
 Générer un rapport QA HTML avec galerie avant/après et statistiques :
 
 ```bash
-python qa_report.py --output-dir data/output --output qa_report.html
+poetry run python qa_report.py --output-dir data/output --output qa_report.html
 ```
 
 Le rapport inclut :
@@ -218,14 +236,14 @@ Les fichiers `.qa.json` sont générés automatiquement pour chaque image trait�
 ### Exécuter les tests
 
 ```bash
-pytest tests/
+poetry run pytest tests/
 ```
 
 ### Formatage du code
 
 ```bash
-black src/
-flake8 src/
+poetry run black src/
+poetry run flake8 src/
 ```
 
 ## Licence

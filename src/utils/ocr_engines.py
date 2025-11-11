@@ -47,11 +47,45 @@ class PaddleOCREngine:
         logger.info(f"Initialisation de PaddleOCR avec les paramètres : {init_kwargs}")
         self.ocr_engine = PaddleOCR(**init_kwargs)
 
-    def recognize(self, image: np.ndarray) -> List[OCRLine]:
+    def recognize(self, image: np.ndarray, max_dimension: int = None) -> List[OCRLine]:
         """
         Prend une image (numpy array) et retourne une liste de lignes de texte structurées.
+        
+        Args:
+            image: Image numpy array
+            max_dimension: Dimension maximale (optionnelle, par défaut lit depuis la config)
         """
-        result = self.ocr_engine.ocr(image)
+        # Pré-traitement : Redimensionner si l'image est trop grande
+        # PaddleOCR a une limite max_side_len de 4000 pixels par défaut
+        if max_dimension is None:
+            max_dimension = 3500  # Valeur par défaut si non spécifiée
+        
+        if image is not None and len(image.shape) >= 2:
+            height, width = image.shape[:2]
+            max_side = max(height, width)
+            
+            if max_side > max_dimension:
+                # Calculer le ratio de redimensionnement
+                scale = max_dimension / max_side
+                new_width = int(width * scale)
+                new_height = int(height * scale)
+                
+                logger.info(
+                    f"Image trop grande ({width}x{height}), redimensionnement à "
+                    f"({new_width}x{new_height}) pour éviter un crash PaddleOCR"
+                )
+                
+                import cv2
+                image = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_AREA)
+        
+        try:
+            result = self.ocr_engine.ocr(image)
+        except Exception as e:
+            # PaddleOCR peut planter sur certaines images (corrompues, format invalide, etc.)
+            logger.error(f"PaddleOCR crashed during inference: {type(e).__name__}: {e}")
+            logger.info(f"Image shape: {image.shape if image is not None else 'None'}")
+            # Retourner une liste vide au lieu de faire planter tout le script
+            return []
 
         if not result or not result[0]:
             return []

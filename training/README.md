@@ -37,9 +37,30 @@ poetry run python training/prepare_training_data.py training/ training_data/
 
 Ce script :
 1. Scanne chaque sous-dossier (= un type de document)
-2. Extrait les features OCR de chaque image avec `FeatureExtractor`
+2. Extrait les features OCR de chaque image avec `FeatureExtractor` **en parallèle**
 3. Sauvegarde les résultats dans des fichiers JSON
 4. Maintient la structure de dossiers
+
+**Options :**
+- `--workers N` : Nombre de processus parallèles (défaut: nombre de CPUs - 1)
+- `--config FILE` : Fichier de configuration personnalisé
+
+**Exemples :**
+```bash
+# Utilisation par défaut (automatique)
+poetry run python training/prepare_training_data.py training/ training_data/
+
+# Limiter à 2 workers (pour économiser la RAM)
+poetry run python training/prepare_training_data.py training/ training_data/ --workers 2
+
+# Utiliser tous les CPUs
+poetry run python training/prepare_training_data.py training/ training_data/ --workers 8
+```
+
+**Performances :**
+- Sur un CPU 8 cœurs : **~8x plus rapide** qu'en séquentiel
+- Chaque worker charge son propre modèle OCR en mémoire
+- Réduire `--workers` si vous manquez de RAM (chaque worker ~2-3 GB)
 
 **Structure générée en sortie :**
 ```

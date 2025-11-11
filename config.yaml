@@ -191,6 +191,12 @@ features:
     # Extra runtime options forwarded to PaddleOCR (e.g., cpu_threads).
     # Leave empty by default for maximum compatibility.
     runtime_options: {}
+    # Maximum dimension (width or height) for images before OCR processing.
+    # Images larger than this will be automatically resized to prevent PaddleOCR crashes.
+    # PaddleOCR has a default max_side_len of 4000, so we use 3500 as safety margin.
+    # Higher values (e.g., 4000) process larger images but risk crashes or slow processing.
+    # Lower values (e.g., 2500) are safer and faster but may lose some detail.
+    max_image_dimension: 3500
     # Minimum confidence threshold for a recognized word/line to be accepted.
     # Higher values (e.g., 0.85) are stricter and only accept high-confidence text, reducing false positives.
     # Lower values (e.g., 0.60) are more lenient but may include incorrectly recognized text.

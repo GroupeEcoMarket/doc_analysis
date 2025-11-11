@@ -98,6 +98,12 @@ class FeatureExtractor:
         ocr_lines = self.extract_ocr(img)
         checkboxes = self.extract_checkboxes(input_path)
         
+        # Avertir si aucune ligne OCR n'a été détectée
+        if not ocr_lines:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Aucune ligne OCR détectée pour {input_path}")
+        
         # Convertir les dictionnaires OCR en objets OCRLine
         ocr_line_objects = [
             OCRLine(
@@ -198,11 +204,12 @@ class FeatureExtractor:
             # OCR non activé dans la config
             return []
         
-        # Extraire les lignes de texte
-        lines = self.ocr_engine.recognize(image)
+        # Extraire les lignes de texte avec redimensionnement automatique si nécessaire
+        ocr_config = self.config.get('ocr', {})
+        max_dimension = ocr_config.get('max_image_dimension', 3500)
+        lines = self.ocr_engine.recognize(image, max_dimension=max_dimension)
         
         # Filtrer selon le seuil de confiance minimum
-        ocr_config = self.config.get('ocr', {})
         min_confidence = ocr_config.get('min_confidence', 0.70)
         
         filtered_lines = [

@@ -15,6 +15,8 @@ from typing import Dict, List, Tuple, Optional, Any
 import numpy as np
 import joblib
 from datetime import datetime
+from multiprocessing import Pool, cpu_count
+from tqdm import tqdm
 
 # Machine Learning
 from sklearn.model_selection import train_test_split, cross_val_score
@@ -48,12 +50,45 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+def process_json_file(file_path_tuple):
+    """
+    Worker function to load and vectorize a single JSON file.
+    Initializes its own FeatureEngineer.
+    
+    Args:
+        file_path_tuple: Tuple of (json_file, doc_type, class_idx, semantic_model_name, min_confidence)
+    
+    Returns:
+        Tuple of (embedding, class_idx) or None if error
+    """
+    json_file, doc_type, class_idx, semantic_model_name, min_confidence = file_path_tuple
+    
+    try:
+        # Chaque worker initialise son propre FeatureEngineer. C'est plus robuste.
+        feature_engineer = FeatureEngineer(
+            semantic_model_name=semantic_model_name,
+            min_confidence=min_confidence
+        )
+        
+        with open(json_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        embedding = feature_engineer.extract_document_embedding(data)
+        
+        return (embedding, class_idx)
+    except Exception as e:
+        # On log l'erreur mais on ne fait pas planter le pool
+        logger.warning(f"Erreur lors du traitement de {json_file}: {e}")
+        return None
+
+
 def load_training_data(
     data_dir: str,
-    feature_engineer: FeatureEngineer
+    feature_engineer_params: dict,
+    num_workers: int = None
 ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
     """
-    Charge et vectorise les données d'entraînement.
+    Charge et vectorise les données d'entraînement en parallèle.
     
     Structure attendue :
     data_dir/
@@ -66,7 +101,9 @@ def load_training_data(
     
     Args:
         data_dir: Répertoire contenant les sous-dossiers par type de document.
-        feature_engineer: Instance de FeatureEngineer pour vectoriser les documents.
+        feature_engineer_params: Dictionnaire avec les paramètres pour FeatureEngineer
+            (semantic_model_name, min_confidence).
+        num_workers: Nombre de processus workers (défaut: cpu_count() - 1).
     
     Returns:
         Tuple de (X, y, class_names) :
@@ -74,17 +111,15 @@ def load_training_data(
         - y: Array numpy des labels (n_samples,)
         - class_names: Liste des noms de classes dans l'ordre
     """
+    if num_workers is None:
+        num_workers = max(1, cpu_count() - 1)
+    
     data_path = Path(data_dir)
     if not data_path.exists():
         raise FileNotFoundError(f"Répertoire de données introuvable: {data_dir}")
     
-    X_list = []
-    y_list = []
-    class_names = []
-    class_to_idx: Dict[str, int] = {}
-    
     # Parcourir les sous-dossiers (chaque sous-dossier = un type de document)
-    type_dirs = [d for d in data_path.iterdir() if d.is_dir()]
+    type_dirs = sorted([d for d in data_path.iterdir() if d.is_dir()])
     
     if not type_dirs:
         raise ValueError(
@@ -94,7 +129,12 @@ def load_training_data(
     
     print(f"📁 Découverte de {len(type_dirs)} types de documents")
     
-    for type_dir in sorted(type_dirs):
+    # Préparer la liste de toutes les tâches à effectuer
+    tasks = []
+    class_names = []
+    class_to_idx: Dict[str, int] = {}
+    
+    for type_dir in type_dirs:
         doc_type = type_dir.name
         
         # Ajouter le type à la liste des classes
@@ -109,23 +149,37 @@ def load_training_data(
         print(f"  {doc_type}: {len(json_files)} fichiers")
         
         for json_file in json_files:
-            try:
-                # Charger le JSON
-                with open(json_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                
-                # Vectoriser le document
-                embedding = feature_engineer.extract_document_embedding(data)
-                
-                X_list.append(embedding)
-                y_list.append(class_idx)
-            
-            except Exception as e:
-                logger.warning(f"Erreur lors du traitement de {json_file}: {e}")
-                continue
+            tasks.append((
+                json_file,
+                doc_type,
+                class_idx,
+                feature_engineer_params['semantic_model_name'],
+                feature_engineer_params['min_confidence']
+            ))
+    
+    if not tasks:
+        raise ValueError("Aucun document .json trouvé dans les données d'entraînement")
+    
+    print(f"\n⚡ Vectorisation de {len(tasks)} documents en parallèle avec {num_workers} workers...")
+    
+    X_list = []
+    y_list = []
+    
+    # Utiliser le Pool pour exécuter les tâches en parallèle
+    with Pool(processes=num_workers) as pool:
+        # tqdm ajoute une barre de progression
+        # imap_unordered retourne les résultats dès qu'ils sont prêts pour un feedback en temps réel
+        results = list(tqdm(pool.imap_unordered(process_json_file, tasks), total=len(tasks), desc="Vectorisation"))
+    
+    # Collecter les résultats
+    for result in results:
+        if result is not None:
+            embedding, class_idx = result
+            X_list.append(embedding)
+            y_list.append(class_idx)
     
     if not X_list:
-        raise ValueError("Aucun document valide trouvé dans les données d'entraînement")
+        raise ValueError("La vectorisation n'a produit aucun résultat valide.")
     
     # Convertir en arrays numpy
     X = np.array(X_list)
@@ -233,7 +287,8 @@ def evaluate_model(
     model: Any,
     X_test: np.ndarray,
     y_test: np.ndarray,
-    class_names: List[str]
+    class_names: List[str],
+    model_type: str
 ) -> Dict[str, Any]:
     """
     Évalue le modèle sur les données de test.
@@ -243,21 +298,62 @@ def evaluate_model(
         X_test: Features de test
         y_test: Labels de test
         class_names: Noms des classes
+        model_type: Type de modèle
     
     Returns:
         Dict avec les métriques d'évaluation
     """
     # Prédictions
-    if hasattr(model, 'predict'):
+    if model_type == 'lightgbm':
+        y_pred_proba = model.predict(X_test)
+        y_pred = np.argmax(y_pred_proba, axis=1)
+    else: # Pour les modèles sklearn
         y_pred = model.predict(X_test)
-    else:
-        # LightGBM utilise predict avec reshape
-        y_pred = model.predict(X_test).argmax(axis=1)
     
     # Métriques
     accuracy = accuracy_score(y_test, y_pred)
     f1 = f1_score(y_test, y_pred, average='weighted')
+
+    feature_importance_results = {}
     
+    if model_type == 'lightgbm' and hasattr(model, 'feature_importance'):
+        feature_importances = model.feature_importance(importance_type='gain')
+        
+        # La dimension totale est la largeur de X_test. On soustrait les 4 features de position.
+        total_features = X_test.shape[1]
+        semantic_dim = total_features - 4
+
+        # Gérer la division par zéro
+        total_importance = np.sum(feature_importances)
+        if total_importance > 0:
+            text_importance = np.sum(feature_importances[:semantic_dim])
+            pos_importance = np.sum(feature_importances[semantic_dim:])
+            
+            # Remplir le dictionnaire de résultats
+            feature_importance_results = {
+                'text_percent': (text_importance / total_importance) * 100,
+                'position_percent': (pos_importance / total_importance) * 100,
+            }
+
+    # Si c'est un modèle sklearn avec feature importances (ex: RandomForest)
+    elif hasattr(model, 'feature_importances_'):
+        feature_importances = model.feature_importances_
+        
+        # Calcul dynamique de la dimension sémantique
+        total_features = X_test.shape[1]
+        semantic_dim = total_features - 4
+        
+        total_importance = np.sum(feature_importances)
+        if total_importance > 0:
+            text_importance = np.sum(feature_importances[:semantic_dim])
+            pos_importance = np.sum(feature_importances[semantic_dim:])
+            
+            # Remplir le dictionnaire de résultats
+            feature_importance_results = {
+                'text_percent': (text_importance / total_importance) * 100,
+                'position_percent': (pos_importance / total_importance) * 100,
+            }
+
     # Rapport de classification
     report = classification_report(
         y_test,
@@ -269,12 +365,14 @@ def evaluate_model(
     # Matrice de confusion
     cm = confusion_matrix(y_test, y_pred)
     
+    # CORRECTION : Retourner le dictionnaire, qui sera vide si pas d'importance
     return {
         'accuracy': accuracy,
         'f1_score': f1,
         'classification_report': report,
         'confusion_matrix': cm.tolist(),
-        'class_names': class_names
+        'class_names': class_names,
+        'feature_importance': feature_importance_results  
     }
 
 
@@ -317,7 +415,8 @@ def save_model_and_report(
         },
         'classification_report': metrics['classification_report'],
         'confusion_matrix': metrics['confusion_matrix'],
-        'class_names': class_names
+        'class_names': class_names,
+        'feature_importances': metrics.get('feature_importance', {})
     }
     
     report_file = Path(report_path)
@@ -343,6 +442,11 @@ def save_model_and_report(
             print(f"    Recall: {cls_metrics.get('recall', 0):.4f}")
             print(f"    F1-Score: {cls_metrics.get('f1-score', 0):.4f}")
 
+    feature_importances = metrics.get('feature_importance', {})
+    if feature_importances:
+        print("\n--- Importance des Features ---")
+        print(f"  Importance relative du Texte    : {feature_importances.get('text_percent', 0):.2f}%")
+        print(f"  Importance relative de la Position : {feature_importances.get('position_percent', 0):.2f}%")
 
 def main():
     """Point d'entrée principal du script d'entraînement."""
@@ -397,20 +501,26 @@ def main():
         default=0.70,
         help="Seuil de confiance minimum pour filtrer les lignes OCR (défaut: 0.70)"
     )
+    parser.add_argument(
+        '--workers',
+        '-w',
+        type=int,
+        default=None,
+        help="Nombre de workers parallèles pour la vectorisation (défaut: cpu_count() - 1)"
+    )
     
     args = parser.parse_args()
     
     try:
-        # Initialiser le feature engineer
-        print("🔧 Initialisation du FeatureEngineer...")
-        feature_engineer = FeatureEngineer(
-            semantic_model_name=args.semantic_model,
-            min_confidence=args.min_confidence
-        )
+        # On passe les paramètres à la place de l'objet FeatureEngineer
+        feature_engineer_params = {
+            'semantic_model_name': args.semantic_model,
+            'min_confidence': args.min_confidence
+        }
         
-        # Charger et vectoriser les données
-        print("\n📚 Chargement des données d'entraînement...")
-        X, y, class_names = load_training_data(args.data_dir, feature_engineer)
+        # Charger et vectoriser les données en parallèle
+        print("\n📚 Chargement et vectorisation des données d'entraînement...")
+        X, y, class_names = load_training_data(args.data_dir, feature_engineer_params, num_workers=args.workers)
         
         # Split train/test
         print(f"\n✂️  Division train/test (test_size={args.test_size})...")
@@ -432,7 +542,7 @@ def main():
         
         # Évaluer le modèle
         print("\n📊 Évaluation du modèle...")
-        metrics = evaluate_model(model, X_test, y_test, class_names)
+        metrics = evaluate_model(model, X_test, y_test, class_names, args.model_type)
         
         # Sauvegarder le modèle et le rapport
         print("\n💾 Sauvegarde...")

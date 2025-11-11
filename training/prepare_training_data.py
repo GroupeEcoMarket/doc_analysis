@@ -12,6 +12,12 @@ import sys
 from pathlib import Path
 import argparse
 import logging
+import gc
+import tempfile
+import shutil
+from multiprocessing import Pool, cpu_count
+from functools import partial
+from tqdm import tqdm
 
 # Ajouter le répertoire parent au path pour importer les modules src
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -21,16 +27,51 @@ from src.utils.config_loader import get_config
 
 # Configuration du logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,  # Seulement les warnings et erreurs
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)  # Mais garder INFO pour ce script
+
+
+def process_single_image(args):
+    """
+    Traite une seule image (fonction worker pour multiprocessing).
+    
+    Args:
+        args: Tuple de (image_file, output_json, config_path, doc_type, index, total)
+        
+    Returns:
+        Tuple de (success: bool, image_name: str, error_msg: str or None)
+    """
+    image_file, output_json, config_path, doc_type, index, total = args
+    
+    try:
+        # Vérifier si le fichier a déjà été traité
+        if output_json.exists():
+            return (True, image_file.name, "skip")
+        
+        # Créer l'extracteur dans chaque worker (chaque processus a sa propre instance)
+        config = get_config(config_path)
+        extractor = FeatureExtractor(app_config=config)
+        
+        # Extraire les features
+        result = extractor.process(str(image_file), str(output_json))
+        
+        if result.status == 'success':
+            return (True, image_file.name, None)
+        else:
+            return (False, image_file.name, result.error)
+    
+    except Exception as e:
+        return (False, image_file.name, f"{type(e).__name__}: {e}")
 
 
 def prepare_training_data(
     input_dir: str,
     output_dir: str,
-    config_path: str = None
+    config_path: str = None,
+    num_workers: int = None
 ) -> None:
     """
     Extrait les features OCR des images et crée les fichiers JSON pour l'entraînement.
@@ -69,10 +110,10 @@ def prepare_training_data(
     # Créer le répertoire de sortie
     output_path.mkdir(parents=True, exist_ok=True)
     
-    # Initialiser l'extracteur de features
-    logger.info("Initialisation de FeatureExtractor...")
-    config = get_config(config_path)
-    extractor = FeatureExtractor(app_config=config)
+    # Déterminer le nombre de workers (laisser 1 CPU libre pour le système)
+    if num_workers is None:
+        num_workers = max(1, cpu_count() - 1)
+    logger.info(f"Utilisation de {num_workers} workers pour le traitement parallèle (sur {cpu_count()} CPUs disponibles)")
     
     # Parcourir les sous-dossiers (chaque sous-dossier = un type de document)
     type_dirs = [d for d in input_path.iterdir() if d.is_dir()]
@@ -101,33 +142,41 @@ def prepare_training_data(
         image_files = list(type_dir.glob('*.png'))
         print(f"   Trouvé {len(image_files)} images")
         
+        if not image_files:
+            continue
+        
+        # Préparer les arguments pour chaque image
+        tasks = [
+            (image_file, output_type_dir / f"{image_file.stem}.json", config_path, doc_type, i, len(image_files))
+            for i, image_file in enumerate(image_files, 1)
+        ]
+        
+        # Traiter les images en parallèle
         success_count = 0
         error_count = 0
         
-        for i, image_file in enumerate(image_files, 1):
-            try:
-                # Créer le chemin de sortie JSON
-                output_json = output_type_dir / f"{image_file.stem}.json"
-                
-                # Vérifier si le fichier a déjà été traité
-                if output_json.exists():
-                    print(f"   [{i}/{len(image_files)}] SKIP {image_file.name} (déjà traité)")
-                    success_count += 1  # Compter comme succès car déjà présent
-                    continue
-                
-                # Extraire les features
-                result = extractor.process(str(image_file), str(output_json))
-                
-                if result.status == 'success':
-                    success_count += 1
-                    print(f"   [{i}/{len(image_files)}] OK {image_file.name}")
-                else:
-                    error_count += 1
-                    logger.warning(f"   [{i}/{len(image_files)}] WARN {image_file.name}: {result.error}")
-            
-            except Exception as e:
+        # --- AMÉLIORATION : Utiliser imap_unordered avec tqdm ---
+        print(f"   Lancement du traitement parallèle...")
+        with Pool(processes=num_workers) as pool:
+            # tqdm va automatiquement créer et mettre à jour une barre de progression
+            # imap_unordered retourne les résultats dès qu'ils sont prêts
+            results = list(tqdm(pool.imap_unordered(process_single_image, tasks), total=len(tasks), desc=f"   {doc_type}"))
+        
+        # Le code ici ne s'exécute qu'une fois TOUTES les tâches terminées,
+        # mais tqdm aura déjà affiché la progression.
+        
+        # Analyser les résultats
+        for success, image_name, error_msg in results:
+            if success:
+                success_count += 1
+            else:
                 error_count += 1
-                logger.error(f"   [{i}/{len(image_files)}] ERROR {image_file.name}: {e}")
+                # On peut logger l'erreur ici si on veut un résumé à la fin
+                if error_msg != "skip":
+                    logger.warning(f"Erreur sur {image_name}: {error_msg}")
+        
+        # Nettoyage mémoire après chaque type
+        gc.collect()
         
         print(f"   Succès: {success_count}, Erreurs: {error_count}")
         type_counts[doc_type] = success_count
@@ -171,11 +220,18 @@ def main():
         default=None,
         help="Chemin optionnel vers le fichier de configuration"
     )
+    parser.add_argument(
+        '--workers',
+        '-w',
+        type=int,
+        default=None,
+        help="Nombre de workers parallèles (défaut: cpu_count() - 1)"
+    )
     
     args = parser.parse_args()
     
     try:
-        prepare_training_data(args.input_dir, args.output_dir, args.config)
+        prepare_training_data(args.input_dir, args.output_dir, args.config, args.workers)
     except Exception as e:
         logger.error(f"[ERROR] Erreur: {e}", exc_info=True)
         return 1

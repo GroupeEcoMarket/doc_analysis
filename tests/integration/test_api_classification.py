@@ -7,10 +7,11 @@ import numpy as np
 import cv2
 from pathlib import Path
 from fastapi.testclient import TestClient
-from unittest.mock import patch, Mock
+from unittest.mock import patch, Mock, MagicMock
 import json
 import tempfile
 import joblib
+from io import BytesIO
 
 from src.api.app import app
 from src.api.dependencies import get_feature_extractor
@@ -199,9 +200,15 @@ class TestClassificationEndpoint:
             data = response.json()
             
             assert data['status'] == 'success'
-            assert data['document_type'] == 'Attestation_CEE'
+            assert data['total_pages'] == 1
+            assert len(data['results_by_page']) == 1
+            
+            # Vérifier la structure de la réponse pour une page
+            page_result = data['results_by_page'][0]
+            assert page_result['page_number'] == 1
+            assert page_result['document_type'] == 'Attestation_CEE'
             # La valeur doit correspondre à celle du mock (0.92)
-            assert data['confidence'] == pytest.approx(0.92)
+            assert page_result['confidence'] == pytest.approx(0.92)
             assert 'processing_time' in data
             
             # L'assertion fonctionne maintenant car le bon mock a été injecté
@@ -298,11 +305,15 @@ class TestClassificationWithRealModel:
         if response.status_code == 200:
             data = response.json()
             assert data['status'] == 'success'
-            assert 'document_type' in data
-            assert 'confidence' in data
+            assert 'total_pages' in data
+            assert 'results_by_page' in data
+            assert len(data['results_by_page']) > 0
+            page_result = data['results_by_page'][0]
+            assert 'document_type' in page_result
+            assert 'confidence' in page_result
             # Si c'est une Attestation CEE, vérifier que le type est correct
             # (peut varier selon le modèle entraîné)
-            assert data['document_type'] is not None or data['confidence'] < 0.6
+            assert page_result['document_type'] is not None or page_result['confidence'] < 0.6
     
     @pytest.mark.skipif(
         not Path("models/document_classifier.joblib").exists(),
@@ -323,8 +334,12 @@ class TestClassificationWithRealModel:
         if response.status_code == 200:
             data = response.json()
             assert data['status'] == 'success'
-            assert 'document_type' in data
-            assert 'confidence' in data
+            assert 'total_pages' in data
+            assert 'results_by_page' in data
+            assert len(data['results_by_page']) > 0
+            page_result = data['results_by_page'][0]
+            assert 'document_type' in page_result
+            assert 'confidence' in page_result
 
 
 class TestClassificationIntegration:
@@ -370,8 +385,292 @@ class TestClassificationIntegration:
         if response.status_code == 200:
             data = response.json()
             assert data['status'] == 'success'
-            assert 'document_type' in data
-            assert 'confidence' in data
-            assert isinstance(data['confidence'], (int, float))
-            assert 0.0 <= data['confidence'] <= 1.0
+            assert 'total_pages' in data
+            assert 'results_by_page' in data
+            assert len(data['results_by_page']) > 0
+            page_result = data['results_by_page'][0]
+            assert 'document_type' in page_result
+            assert 'confidence' in page_result
+            assert isinstance(page_result['confidence'], (int, float))
+            assert 0.0 <= page_result['confidence'] <= 1.0
+
+    @patch('src.api.routes.ProcessPoolExecutor')
+    @patch('src.classification.feature_engineering.SentenceTransformer')
+    @patch('src.classification.classifier_service.joblib.load')
+    def test_classify_multipage_pdf_with_mock(
+        self,
+        mock_joblib_load,
+        mock_sentence_transformer_class,
+        mock_process_pool_executor,
+        client,
+        sample_image
+    ):
+        """
+        Teste la classification d'un PDF multi-pages en mockant le traitement parallèle.
+        """
+        # --- Configuration des Mocks ---
+        # Mock SentenceTransformer pour éviter les appels réseau
+        mock_st_model = Mock()
+        mock_st_model.encode.return_value = np.random.rand(384).astype(np.float32)
+        mock_st_model.get_sentence_embedding_dimension.return_value = 384
+        mock_sentence_transformer_class.return_value = mock_st_model
+        
+        # Mock joblib.load pour mocker le modèle interne
+        mock_model = Mock()
+        mock_model.predict.side_effect = [np.array([0]), np.array([1])]  # Page 1 -> Classe 0, Page 2 -> Classe 1
+        mock_model.predict_proba.side_effect = [np.array([[0.9, 0.1]]), np.array([[0.2, 0.8]])]
+        mock_joblib_load.return_value = {
+            'model': mock_model,
+            'class_names': ['Attestation_CEE', 'Facture']
+        }
+        
+        # Mock du Feature Extractor
+        mock_extractor = Mock()
+        mock_extractor.extract_ocr.return_value = [
+            {
+                'text': 'mock text',
+                'confidence': 0.9,
+                'bounding_box': [0, 0, 1, 1]
+            }
+        ]
+        app.dependency_overrides[get_feature_extractor] = lambda: mock_extractor
+        
+        # --- Mock de ProcessPoolExecutor ---
+        # On configure le mock pour qu'il se comporte comme un `map` synchrone
+        mock_executor_instance = MagicMock()
+        mock_executor_context = MagicMock()
+        mock_executor_context.__enter__.return_value = mock_executor_instance
+        mock_executor_context.__exit__.return_value = None
+        mock_process_pool_executor.return_value = mock_executor_context
+        
+        # Le `map` doit retourner les résultats comme le ferait le vrai `process_page_worker`
+        mock_executor_instance.map.return_value = [
+            (0, {'document_type': 'Attestation_CEE', 'confidence': 0.9}),  # Résultat pour la page 0
+            (1, {'document_type': 'Facture', 'confidence': 0.8})  # Résultat pour la page 1
+        ]
+        
+        # --- Création du fichier PDF de test ---
+        # Utiliser PIL pour créer un PDF multi-pages (plus simple et fiable)
+        try:
+            from PIL import Image
+            # Convertir l'image numpy en format PIL
+            pil_image = Image.fromarray(cv2.cvtColor(sample_image, cv2.COLOR_BGR2RGB))
+            
+            # Créer un PDF avec deux pages identiques
+            img_bytes = BytesIO()
+            pil_image.save(img_bytes, format='PDF', save_all=True, append_images=[pil_image])
+            pdf_bytes = img_bytes.getvalue()
+            
+        except ImportError:
+            # Fallback: créer un PDF simple avec reportlab si PIL n'est pas disponible
+            try:
+                from reportlab.pdfgen import canvas
+                from reportlab.lib.pagesizes import letter
+                
+                buffer = BytesIO()
+                p = canvas.Canvas(buffer, pagesize=letter)
+                p.drawString(100, 750, "Page 1")
+                p.showPage()
+                p.drawString(100, 750, "Page 2")
+                p.showPage()
+                p.save()
+                pdf_bytes = buffer.getvalue()
+            except ImportError:
+                pytest.skip("PIL/Pillow ou reportlab non disponible pour créer un PDF de test")
+        
+        try:
+            # --- Exécution du Test ---
+            response = client.post(
+                "/api/v1/classify",
+                files={"file": ("test_2pages.pdf", pdf_bytes, "application/pdf")}
+            )
+            
+            # --- Assertions ---
+            assert response.status_code == 200
+            data = response.json()
+            
+            assert data['status'] == 'success'
+            assert data['total_pages'] == 2
+            assert len(data['results_by_page']) == 2
+            
+            # Vérifier la page 1
+            assert data['results_by_page'][0]['page_number'] == 1
+            assert data['results_by_page'][0]['document_type'] == 'Attestation_CEE'
+            assert data['results_by_page'][0]['confidence'] == pytest.approx(0.9)
+            
+            # Vérifier la page 2
+            assert data['results_by_page'][1]['page_number'] == 2
+            assert data['results_by_page'][1]['document_type'] == 'Facture'
+            assert data['results_by_page'][1]['confidence'] == pytest.approx(0.8)
+            
+            # Vérifier que le ProcessPoolExecutor a bien été utilisé
+            mock_process_pool_executor.assert_called_once()
+            mock_executor_instance.map.assert_called_once()
+            
+        finally:
+            # Nettoyage crucial
+            app.dependency_overrides.clear()
+
+    @patch('src.api.routes.ProcessPoolExecutor')
+    @patch('src.classification.feature_engineering.SentenceTransformer')
+    @patch('src.classification.classifier_service.joblib.load')
+    def test_classify_single_image_sequential_processing(
+        self,
+        mock_joblib_load,
+        mock_sentence_transformer_class,
+        mock_process_pool_executor,
+        client,
+        sample_image
+    ):
+        """
+        Teste la classification d'une image unique (traitement séquentiel).
+        Vérifie que ProcessPoolExecutor n'est PAS utilisé pour une seule page.
+        """
+        # --- Configuration des Mocks ---
+        # Mock SentenceTransformer pour éviter les appels réseau
+        mock_st_model = Mock()
+        mock_st_model.encode.return_value = np.random.rand(384).astype(np.float32)
+        mock_st_model.get_sentence_embedding_dimension.return_value = 384
+        mock_sentence_transformer_class.return_value = mock_st_model
+        
+        # Mock joblib.load pour mocker le modèle interne
+        mock_model = Mock()
+        mock_model.predict.return_value = np.array([0])  # Classe 0 = Attestation_CEE
+        mock_model.predict_proba.return_value = np.array([[0.92, 0.08]])
+        mock_joblib_load.return_value = {
+            'model': mock_model,
+            'class_names': ['Attestation_CEE', 'Facture']
+        }
+        
+        # Mock du Feature Extractor
+        mock_extractor = Mock()
+        mock_extractor.extract_ocr.return_value = [
+            {
+                'text': 'Attestation de conformité CEE',
+                'confidence': 0.95,
+                'bounding_box': [100, 200, 500, 250]
+            }
+        ]
+        app.dependency_overrides[get_feature_extractor] = lambda: mock_extractor
+        
+        try:
+            # --- Exécution du Test ---
+            _, img_encoded = cv2.imencode('.png', sample_image)
+            response = client.post(
+                "/api/v1/classify",
+                files={"file": ("test.png", img_encoded.tobytes(), "image/png")}
+            )
+            
+            # --- Assertions ---
+            assert response.status_code == 200
+            data = response.json()
+            
+            assert data['status'] == 'success'
+            assert data['total_pages'] == 1
+            assert len(data['results_by_page']) == 1
+            
+            # Vérifier la structure de la réponse pour une page
+            page_result = data['results_by_page'][0]
+            assert page_result['page_number'] == 1
+            assert page_result['document_type'] == 'Attestation_CEE'
+            assert page_result['confidence'] == pytest.approx(0.92)
+            assert 'processing_time' in data
+            
+            # Vérifier que ProcessPoolExecutor n'a PAS été appelé (traitement séquentiel)
+            mock_process_pool_executor.assert_not_called()
+            
+            # Vérifier que le traitement séquentiel a bien été utilisé
+            mock_extractor.extract_ocr.assert_called_once()
+            
+        finally:
+            # Nettoyage crucial
+            app.dependency_overrides.clear()
+
+    @patch('src.api.routes.ProcessPoolExecutor')
+    @patch('src.classification.feature_engineering.SentenceTransformer')
+    @patch('src.classification.classifier_service.joblib.load')
+    def test_classify_single_page_pdf_sequential_processing(
+        self,
+        mock_joblib_load,
+        mock_sentence_transformer_class,
+        mock_process_pool_executor,
+        client,
+        sample_image
+    ):
+        """
+        Teste la classification d'un PDF d'une seule page (traitement séquentiel).
+        Vérifie que ProcessPoolExecutor n'est PAS utilisé pour une seule page.
+        """
+        # --- Configuration des Mocks ---
+        # Mock SentenceTransformer pour éviter les appels réseau
+        mock_st_model = Mock()
+        mock_st_model.encode.return_value = np.random.rand(384).astype(np.float32)
+        mock_st_model.get_sentence_embedding_dimension.return_value = 384
+        mock_sentence_transformer_class.return_value = mock_st_model
+        
+        # Mock joblib.load pour mocker le modèle interne
+        mock_model = Mock()
+        mock_model.predict.return_value = np.array([1])  # Classe 1 = Facture
+        mock_model.predict_proba.return_value = np.array([[0.15, 0.85]])
+        mock_joblib_load.return_value = {
+            'model': mock_model,
+            'class_names': ['Attestation_CEE', 'Facture']
+        }
+        
+        # Mock du Feature Extractor
+        mock_extractor = Mock()
+        mock_extractor.extract_ocr.return_value = [
+            {
+                'text': 'FACTURE',
+                'confidence': 0.95,
+                'bounding_box': [50, 50, 300, 100]
+            }
+        ]
+        app.dependency_overrides[get_feature_extractor] = lambda: mock_extractor
+        
+        # --- Création du fichier PDF de test (1 page) ---
+        try:
+            from PIL import Image
+            # Convertir l'image numpy en format PIL
+            pil_image = Image.fromarray(cv2.cvtColor(sample_image, cv2.COLOR_BGR2RGB))
+            
+            # Créer un PDF avec une seule page
+            img_bytes = BytesIO()
+            pil_image.save(img_bytes, format='PDF')
+            pdf_bytes = img_bytes.getvalue()
+            
+        except ImportError:
+            pytest.skip("PIL/Pillow non disponible pour créer un PDF de test")
+        
+        try:
+            # --- Exécution du Test ---
+            response = client.post(
+                "/api/v1/classify",
+                files={"file": ("test_1page.pdf", pdf_bytes, "application/pdf")}
+            )
+            
+            # --- Assertions ---
+            assert response.status_code == 200
+            data = response.json()
+            
+            assert data['status'] == 'success'
+            assert data['total_pages'] == 1
+            assert len(data['results_by_page']) == 1
+            
+            # Vérifier la structure de la réponse pour une page
+            page_result = data['results_by_page'][0]
+            assert page_result['page_number'] == 1
+            assert page_result['document_type'] == 'Facture'
+            assert page_result['confidence'] == pytest.approx(0.85)
+            assert 'processing_time' in data
+            
+            # Vérifier que ProcessPoolExecutor n'a PAS été appelé (traitement séquentiel)
+            mock_process_pool_executor.assert_not_called()
+            
+            # Vérifier que le traitement séquentiel a bien été utilisé
+            mock_extractor.extract_ocr.assert_called_once()
+            
+        finally:
+            # Nettoyage crucial
+            app.dependency_overrides.clear()
 

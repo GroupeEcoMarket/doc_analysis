@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import cv2
 import time
+from concurrent.futures import ProcessPoolExecutor
 
 from src.services.processing_service import ProcessingService
 from src.services.task_manager import get_task_manager, TaskStatus
@@ -41,6 +42,58 @@ router = APIRouter()
 
 # Initialize task manager (singleton)
 task_manager = get_task_manager()
+
+
+# ==========================================
+# Multiprocessing Worker Functions
+# ==========================================
+
+# Dictionnaire global pour stocker les dépendances initialisées dans chaque worker
+worker_dependencies = {}
+
+
+def init_api_worker():
+    """
+    Initialise les dépendances (modèles lourds) une seule fois par processus worker.
+    """
+    global worker_dependencies
+    if 'feature_extractor' not in worker_dependencies:
+        print(f"Initialisation des modèles pour le worker PID: {os.getpid()}")
+        # On utilise les fonctions de dépendances pour recréer les objets
+        config = get_app_config()
+        worker_dependencies['feature_extractor'] = get_feature_extractor(config)
+        try:
+            worker_dependencies['document_classifier'] = get_document_classifier(config)
+        except ValueError:
+            # Gérer le cas où la classification est désactivée
+            worker_dependencies['document_classifier'] = None
+    else:
+        print(f"Modèles déjà initialisés pour le worker PID: {os.getpid()}")
+
+
+def process_page_worker(page_tuple: Tuple[int, np.ndarray]) -> Tuple[int, Dict[str, Any]]:
+    """
+    Fonction exécutée par chaque worker pour traiter une seule page.
+    Utilise les modèles initialisés dans worker_dependencies.
+    """
+    page_index, image_np = page_tuple
+    
+    feature_extractor = worker_dependencies.get('feature_extractor')
+    document_classifier = worker_dependencies.get('document_classifier')
+    
+    if not feature_extractor or not document_classifier:
+        # Si les modèles ne sont pas chargés, on retourne une erreur
+        return page_index, {
+            'document_type': None,
+            'confidence': 0.0,
+            'error': "Classifier non disponible dans le worker."
+        }
+        
+    ocr_lines = feature_extractor.extract_ocr(image_np)
+    ocr_data = {'ocr_lines': ocr_lines}
+    classification_result = document_classifier.predict(ocr_data)
+    
+    return page_index, classification_result
 
 
 # ==========================================
@@ -141,6 +194,22 @@ class ClassificationResponse(BaseModel):
     filename: Optional[str] = Field(None, description="Nom du fichier d'entrée")
     document_type: Optional[str] = Field(None, description="Type de document détecté")
     confidence: float = Field(..., description="Confiance de la classification (0.0-1.0)")
+    processing_time: float = Field(..., description="Temps de traitement en secondes")
+
+
+class PageClassificationResult(BaseModel):
+    """Result for a single page classification"""
+    page_number: int = Field(..., description="Numéro de page (1-indexed)")
+    document_type: Optional[str] = Field(None, description="Type de document détecté")
+    confidence: float = Field(..., description="Confiance de la classification (0.0-1.0)")
+
+
+class MultiPageClassificationResponse(BaseModel):
+    """Response model for multi-page document classification endpoint"""
+    status: str = Field(..., description="Statut du traitement")
+    filename: Optional[str] = Field(None, description="Nom du fichier d'entrée")
+    total_pages: int = Field(..., description="Nombre total de pages traitées")
+    results_by_page: List[PageClassificationResult] = Field(..., description="Résultats de classification par page")
     processing_time: float = Field(..., description="Temps de traitement en secondes")
 
 
@@ -511,16 +580,16 @@ async def pipeline_geometry(
             pass
 
 
-def pdf_buffer_to_image(pdf_buffer: bytes, dpi: int = 300) -> np.ndarray:
+def pdf_buffer_to_images(pdf_buffer: bytes, dpi: int = 300) -> List[np.ndarray]:
     """
-    Convertit un PDF depuis un buffer mémoire en image numpy.
+    Convertit un PDF depuis un buffer mémoire en liste d'images numpy.
     
     Args:
         pdf_buffer: Contenu du PDF en bytes
         dpi: Résolution DPI pour la conversion
         
     Returns:
-        np.ndarray: Image numpy (première page)
+        List[np.ndarray]: Liste d'images numpy (une par page)
         
     Raises:
         HTTPException: Si la conversion échoue
@@ -540,8 +609,6 @@ def pdf_buffer_to_image(pdf_buffer: bytes, dpi: int = 300) -> np.ndarray:
             doc.close()
             raise HTTPException(status_code=400, detail="Le PDF est vide.")
         
-        # Récupérer la première page
-        page = doc[0]
         # Utiliser min_dpi depuis la config (défaut: 300 si non disponible)
         from src.utils.config_loader import get_config
         try:
@@ -551,23 +618,29 @@ def pdf_buffer_to_image(pdf_buffer: bytes, dpi: int = 300) -> np.ndarray:
             min_dpi = 300  # Fallback si la config n'est pas disponible
         actual_dpi = max(dpi, min_dpi)
         mat = fitz.Matrix(actual_dpi / 72, actual_dpi / 72)
-        pix = page.get_pixmap(matrix=mat)
         
-        # Convertir en numpy array
-        img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
-            pix.height, pix.width, pix.n
-        )
-        
-        # Convertir le format de couleur selon le nombre de canaux
-        if pix.n == 4:  # RGBA
-            img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2BGR)
-        elif pix.n == 3:  # RGB
-            img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-        elif pix.n == 1:  # Grayscale
-            img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2BGR)
+        images = []
+        # Boucler sur toutes les pages
+        for page in doc:
+            pix = page.get_pixmap(matrix=mat)
+            
+            # Convertir en numpy array
+            img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+                pix.height, pix.width, pix.n
+            )
+            
+            # Convertir le format de couleur selon le nombre de canaux
+            if pix.n == 4:  # RGBA
+                img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2BGR)
+            elif pix.n == 3:  # RGB
+                img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+            elif pix.n == 1:  # Grayscale
+                img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2BGR)
+            
+            images.append(img_array)
         
         doc.close()
-        return img_array
+        return images
         
     except Exception as e:
         raise HTTPException(
@@ -612,8 +685,11 @@ async def pipeline_features(
         image_np: np.ndarray
         
         if is_pdf(file.filename or ""):
-            # Utiliser PyMuPDF pour convertir le PDF en mémoire
-            image_np = pdf_buffer_to_image(file_content, dpi=300)
+            # Utiliser PyMuPDF pour convertir le PDF en mémoire (première page seulement)
+            images_np = pdf_buffer_to_images(file_content, dpi=300)
+            image_np = images_np[0] if images_np else None
+            if image_np is None:
+                raise HTTPException(status_code=400, detail="Le PDF est vide.")
         else:
             # Convertir l'image directement depuis le buffer mémoire
             image_np = cv2.imdecode(np.frombuffer(file_content, np.uint8), cv2.IMREAD_COLOR)
@@ -650,7 +726,7 @@ async def pipeline_features(
 
 @router.post(
     "/classify",
-    response_model=ClassificationResponse,
+    response_model=MultiPageClassificationResponse,
     summary="Document Type Classification",
     description="""
     Classifie le type de document depuis une image ou un PDF.
@@ -659,14 +735,15 @@ async def pipeline_features(
     1. Extrait les features OCR (via /pipeline/features)
     2. Vectorise le document avec des embeddings multi-modaux
     3. Classe le document avec le modèle ML entraîné
-    4. Retourne le type de document et la confiance
+    4. Retourne le type de document et la confiance pour chaque page
     
     **Input:**
     - Accepts image files (PNG, JPG, JPEG, TIFF, BMP) or PDF files
     
     **Output:**
-    - **document_type:** Type de document détecté (ex: "Attestation_CEE", "Facture")
-    - **confidence:** Confiance de la classification (0.0-1.0)
+    - **total_pages:** Nombre total de pages traitées
+    - **results_by_page:** Liste des résultats de classification pour chaque page
+    - Pour chaque page: **document_type** (ex: "Attestation_CEE", "Facture") et **confidence** (0.0-1.0)
     - Si la confiance est en dessous du seuil configuré, document_type sera None
     
     **Note:** La classification doit être activée dans config.yaml (classification.enabled: true)
@@ -676,9 +753,9 @@ async def classify_document(
     feature_extractor: Annotated[FeatureExtractor, Depends(get_feature_extractor)],
     document_classifier: Annotated[DocumentClassifier, Depends(get_document_classifier)],
     file: UploadFile = File(...)
-) -> ClassificationResponse:
+) -> MultiPageClassificationResponse:
     """
-    Classe le type de document depuis une image ou un PDF.
+    Classe le type de document depuis une image ou un PDF (toutes les pages).
     """
     start_time = time.time()
     
@@ -688,36 +765,63 @@ async def classify_document(
         if not file_content:
             raise HTTPException(status_code=400, detail="Le fichier est vide.")
         
-        # 2. Convertir en image NumPy
-        image_np: np.ndarray
+        # 2. Convertir en images NumPy
+        images_np: List[np.ndarray]
         
         if is_pdf(file.filename or ""):
-            # Utiliser PyMuPDF pour convertir le PDF en mémoire
-            image_np = pdf_buffer_to_image(file_content, dpi=300)
+            # Utiliser PyMuPDF pour convertir le PDF en mémoire (toutes les pages)
+            images_np = pdf_buffer_to_images(file_content, dpi=300)
         else:
-            # Convertir l'image directement depuis le buffer mémoire
-            image_np = cv2.imdecode(np.frombuffer(file_content, np.uint8), cv2.IMREAD_COLOR)
-            if image_np is None:
+            # Pour une image simple, on la met dans une liste d'un seul élément
+            img = cv2.imdecode(np.frombuffer(file_content, np.uint8), cv2.IMREAD_COLOR)
+            if img is None:
                 raise HTTPException(status_code=400, detail="Format d'image invalide ou corrompu.")
+            images_np = [img]
         
-        # 3. Extraire les features OCR
-        ocr_lines = feature_extractor.extract_ocr(image_np)
+        num_pages = len(images_np)
+        page_results_list = [None] * num_pages
         
-        # 4. Préparer les données OCR pour la classification
-        ocr_data = {
-            'ocr_lines': ocr_lines
-        }
+        # --- LOGIQUE DE PARALLÉLISATION ---
+        # Seuil pragmatique : ne pas lancer de processus pour un petit nombre de pages
+        # Le coût de création des processus peut être supérieur au gain.
+        PARALLEL_PROCESSING_THRESHOLD = 2
         
-        # 5. Classifier le document
-        classification_result = document_classifier.predict(ocr_data)
+        if num_pages >= PARALLEL_PROCESSING_THRESHOLD:
+            logger.info(f"Traitement parallèle de {num_pages} pages...")
+            # Préparer les tâches avec leur index original
+            tasks = [(i, images_np[i]) for i in range(num_pages)]
+            
+            with ProcessPoolExecutor(max_workers=os.cpu_count(), initializer=init_api_worker) as executor:
+                # `map` exécute la fonction sur chaque élément de `tasks` et préserve l'ordre
+                results = executor.map(process_page_worker, tasks)
+                
+                for original_index, classification_result in results:
+                    page_results_list[original_index] = PageClassificationResult(
+                        page_number=original_index + 1,
+                        document_type=classification_result.get('document_type'),
+                        confidence=classification_result.get('confidence', 0.0)
+                    )
+        
+        else:  # Traitement séquentiel pour les petits documents
+            logger.info(f"Traitement séquentiel de {num_pages} page(s)...")
+            for i, image_np in enumerate(images_np):
+                ocr_lines = feature_extractor.extract_ocr(image_np)
+                ocr_data = {'ocr_lines': ocr_lines}
+                classification_result = document_classifier.predict(ocr_data)
+                
+                page_results_list[i] = PageClassificationResult(
+                    page_number=i + 1,
+                    document_type=classification_result.get('document_type'),
+                    confidence=classification_result.get('confidence', 0.0)
+                )
         
         processing_time = time.time() - start_time
         
-        return ClassificationResponse(
+        return MultiPageClassificationResponse(
             status="success",
             filename=file.filename,
-            document_type=classification_result.get('document_type'),
-            confidence=classification_result.get('confidence', 0.0),
+            total_pages=num_pages,
+            results_by_page=page_results_list,
             processing_time=processing_time
         )
         

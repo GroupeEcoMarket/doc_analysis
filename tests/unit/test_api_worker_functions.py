@@ -11,6 +11,47 @@ import sys
 from src.api.routes import init_api_worker, process_page_worker, worker_dependencies
 
 
+# Fixture pour créer un mock de configuration réaliste
+@pytest.fixture
+def mock_app_config_for_worker():
+    """
+    Crée un mock de configuration réaliste pour les tests des workers.
+    Ce mock retourne des dictionnaires concrets pour les clés attendues.
+    """
+    mock_config = MagicMock()
+    
+    # Configurer le mock pour qu'il retourne un dictionnaire réel pour 'features'
+    # C'est la clé de la correction.
+    features_config = {
+        'ocr': {
+            'enabled': True,
+            'default_language': 'fr',  # <-- La valeur concrète attendue !
+            'use_gpu': False,
+            'runtime_options': {},
+            'max_image_dimension': 3500,
+            'min_confidence': 0.70
+        }
+    }
+    
+    # Configurer aussi la section classification pour get_document_classifier
+    classification_config = {
+        'enabled': True
+    }
+    
+    # Simuler la méthode .get() pour retourner des valeurs concrètes
+    def get_side_effect(key, default=None):
+        if key == 'features':
+            return features_config
+        elif key == 'classification':
+            return classification_config
+        # Retourner un autre mock pour les clés non spécifiées
+        return MagicMock()
+    
+    mock_config.get.side_effect = get_side_effect
+    
+    return mock_config
+
+
 class TestInitApiWorker:
     """Tests pour la fonction init_api_worker"""
     
@@ -20,111 +61,103 @@ class TestInitApiWorker:
         from src.api.routes import worker_dependencies
         worker_dependencies.clear()
     
-    @patch('src.api.routes.get_document_classifier')
-    @patch('src.api.routes.get_feature_extractor')
-    @patch('src.api.routes.get_app_config')
+    # L'ordre des patchs est inversé par rapport à l'ordre des arguments.
+    # Le patch du bas est appliqué en premier.
+    @patch('src.utils.worker_init.create_api_dependencies_from_config')  # Patch #2
+    @patch('src.api.routes.get_app_config')  # Patch #1
     def test_init_api_worker_success(
         self,
-        mock_get_app_config,
-        mock_get_feature_extractor,
-        mock_get_document_classifier
+        mock_get_app_config,      # Correspond à @patch #1
+        mock_create_deps_func,    # Correspond à @patch #2
+        mock_app_config_for_worker
     ):
-        """Test que init_api_worker initialise correctement les dépendances"""
-        # Configuration des mocks
-        mock_config = Mock()
-        mock_get_app_config.return_value = mock_config
+        """Test que init_api_worker initialise correctement les dépendances."""
+        # 1. Configurer les mocks
+        mock_get_app_config.return_value = mock_app_config_for_worker
         
         mock_feature_extractor = Mock()
-        mock_get_feature_extractor.return_value = mock_feature_extractor
-        
         mock_classifier = Mock()
-        mock_get_document_classifier.return_value = mock_classifier
+        mock_create_deps_func.return_value = {
+            'feature_extractor': mock_feature_extractor,
+            'document_classifier': mock_classifier
+        }
         
-        # Appel de la fonction
+        # 2. Appeler la fonction à tester
         init_api_worker()
         
-        # Vérifications
-        mock_get_app_config.assert_called_once()
-        mock_get_feature_extractor.assert_called_once_with(mock_config)
-        mock_get_document_classifier.assert_called_once_with(mock_config)
+        from src.api.routes import worker_dependencies
         
-        # Vérifier que worker_dependencies est rempli
+        # 3. Vérifications
+        mock_get_app_config.assert_called_once()
+        mock_create_deps_func.assert_called_once_with(mock_app_config_for_worker)
+        
         assert 'feature_extractor' in worker_dependencies
         assert 'document_classifier' in worker_dependencies
         assert worker_dependencies['feature_extractor'] == mock_feature_extractor
         assert worker_dependencies['document_classifier'] == mock_classifier
     
-    @patch('src.api.routes.get_document_classifier')
-    @patch('src.api.routes.get_feature_extractor')
+    @patch('src.utils.worker_init.create_api_dependencies_from_config')
     @patch('src.api.routes.get_app_config')
     def test_init_api_worker_classifier_disabled(
         self,
         mock_get_app_config,
-        mock_get_feature_extractor,
-        mock_get_document_classifier
+        mock_create_deps_func,
+        mock_app_config_for_worker
     ):
-        """Test que init_api_worker gère le cas où la classification est désactivée"""
-        # Configuration des mocks
-        mock_config = Mock()
-        mock_get_app_config.return_value = mock_config
+        """Test que init_api_worker gère le cas où la classification est désactivée."""
+        mock_get_app_config.return_value = mock_app_config_for_worker
         
-        mock_feature_extractor = Mock()
-        mock_get_feature_extractor.return_value = mock_feature_extractor
+        mock_create_deps_func.return_value = {
+            'feature_extractor': Mock(),
+            'document_classifier': None
+        }
         
-        # Simuler une ValueError quand la classification est désactivée
-        mock_get_document_classifier.side_effect = ValueError("Classification désactivée")
-        
-        # Appel de la fonction
         init_api_worker()
         
-        # Vérifications
-        mock_get_app_config.assert_called_once()
-        mock_get_feature_extractor.assert_called_once_with(mock_config)
-        mock_get_document_classifier.assert_called_once_with(mock_config)
+        from src.api.routes import worker_dependencies
         
-        # Vérifier que worker_dependencies est rempli avec classifier=None
+        mock_get_app_config.assert_called_once()
+        mock_create_deps_func.assert_called_once_with(mock_app_config_for_worker)
+        
         assert 'feature_extractor' in worker_dependencies
         assert 'document_classifier' in worker_dependencies
-        assert worker_dependencies['feature_extractor'] == mock_feature_extractor
         assert worker_dependencies['document_classifier'] is None
     
-    @patch('src.api.routes.get_document_classifier')
-    @patch('src.api.routes.get_feature_extractor')
+    @patch('src.utils.worker_init.create_api_dependencies_from_config')
     @patch('src.api.routes.get_app_config')
     def test_init_api_worker_idempotent(
         self,
         mock_get_app_config,
-        mock_get_feature_extractor,
-        mock_get_document_classifier
+        mock_create_deps_func,
+        mock_app_config_for_worker
     ):
-        """Test que init_api_worker est idempotent (peut être appelé plusieurs fois)"""
-        # Configuration des mocks
-        mock_config = Mock()
-        mock_get_app_config.return_value = mock_config
+        """Test que init_api_worker est idempotent (peut être appelé plusieurs fois)."""
+        mock_get_app_config.return_value = mock_app_config_for_worker
         
         mock_feature_extractor = Mock()
-        mock_get_feature_extractor.return_value = mock_feature_extractor
-        
         mock_classifier = Mock()
-        mock_get_document_classifier.return_value = mock_classifier
+        mock_create_deps_func.return_value = {
+            'feature_extractor': mock_feature_extractor,
+            'document_classifier': mock_classifier
+        }
         
         # Premier appel
         init_api_worker()
         
         # Réinitialiser les mocks pour compter les appels
         mock_get_app_config.reset_mock()
-        mock_get_feature_extractor.reset_mock()
-        mock_get_document_classifier.reset_mock()
+        mock_create_deps_func.reset_mock()
         
         # Deuxième appel
         init_api_worker()
         
         # Vérifier que les fonctions ne sont pas appelées à nouveau
+        # (car worker_dependencies['feature_extractor'] existe déjà)
         mock_get_app_config.assert_not_called()
-        mock_get_feature_extractor.assert_not_called()
-        mock_get_document_classifier.assert_not_called()
+        mock_create_deps_func.assert_not_called()
         
         # Vérifier que worker_dependencies est toujours rempli
+        from src.api.routes import worker_dependencies
         assert 'feature_extractor' in worker_dependencies
         assert 'document_classifier' in worker_dependencies
 

@@ -9,7 +9,8 @@ import numpy as np
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
+from concurrent.futures import ProcessPoolExecutor
 from onnxtr.io import DocumentFile as OnnxTRDocumentFile
 from src.utils.file_handler import ensure_dir, get_files, get_output_path
 from src.utils.transform_handler import (
@@ -23,6 +24,134 @@ from src.pipeline.models import GeometryOutput, CropMetadata, DeskewMetadata
 from typing import Optional
 
 logger = get_logger(__name__)
+
+
+# ==========================================
+# Multiprocessing Worker Functions
+# ==========================================
+
+# Variable globale pour stocker le normalizer dans chaque worker
+worker_normalizer = None
+
+
+def init_geometry_worker(geo_config_dict: dict, qa_config_dict: dict, perf_config_dict: dict, output_config_dict: dict):
+    """
+    Initialise un worker avec une instance de GeometryNormalizer.
+    
+    Cette fonction est appelée une fois par processus worker pour initialiser
+    les modèles lourds (ONNX, doctr) dans chaque processus.
+    
+    Utilise les utilitaires partagés de src.utils.worker_init pour éviter la duplication.
+    
+    Args:
+        geo_config_dict: Dictionnaire de configuration géométrique (sérialisable)
+        qa_config_dict: Dictionnaire de configuration QA (sérialisable)
+        perf_config_dict: Dictionnaire de configuration de performance (sérialisable)
+        output_config_dict: Dictionnaire de configuration de sortie (sérialisable)
+    """
+    global worker_normalizer
+    
+    from src.utils.worker_init import (
+        create_geometry_normalizer_from_dicts,
+        log_worker_initialization
+    )
+    
+    # Créer le normalizer en utilisant la fonction partagée
+    worker_normalizer = create_geometry_normalizer_from_dicts(
+        geo_config_dict=geo_config_dict,
+        qa_config_dict=qa_config_dict,
+        perf_config_dict=perf_config_dict,
+        output_config_dict=output_config_dict
+    )
+    
+    log_worker_initialization('geometry')
+
+
+def process_single_image_geometry(image_tuple: Tuple[np.ndarray, Dict[str, Any], str, str, Dict[str, Any]]) -> GeometryOutput:
+    """
+    Fonction exécutée par chaque worker pour traiter une seule image.
+    
+    Cette fonction traite le reste du pipeline (deskew, orientation, rotation)
+    après que le crop intelligent ait été fait en batch.
+    
+    Args:
+        image_tuple: Tuple contenant:
+            - image: Image numpy (déjà croppée)
+            - metadata_info: Dictionnaire avec capture_type, capture_info, etc.
+            - output_transformed_path: Chemin de sortie pour l'image transformée
+            - original_input_path: Chemin original du fichier source
+            - crop_metadata: Métadonnées du crop (pour les ajouter au résultat)
+    
+    Returns:
+        GeometryOutput: Résultat du traitement
+    """
+    global worker_normalizer
+    
+    if worker_normalizer is None:
+        raise RuntimeError("Worker normalizer non initialisé. Appelez init_geometry_worker d'abord.")
+    
+    image, metadata_info, output_transformed_path, original_input_path, crop_metadata = image_tuple
+    
+    try:
+        # Stocker le chemin original pour l'utiliser dans process()
+        # Générer le chemin original à partir du chemin transformé
+        path_obj = Path(output_transformed_path)
+        if '_transformed' in path_obj.stem:
+            original_stem = path_obj.stem.replace('_transformed', '_original')
+        else:
+            original_stem = f"{path_obj.stem}_original"
+        output_original_path = str(path_obj.with_stem(original_stem))
+        worker_normalizer._current_output_original_path = output_original_path
+        
+        # Traiter l'image avec le reste du pipeline
+        result = worker_normalizer.process(
+            img=image,
+            output_path=output_transformed_path,
+            capture_type=metadata_info['capture_type'],
+            original_input_path=original_input_path,
+            capture_info=metadata_info.get('capture_info')
+        )
+        
+        # Mettre à jour les chemins et les métadonnées de crop
+        result.output_original_path = output_original_path
+        result.output_transformed_path = output_transformed_path
+        result.crop_metadata = CropMetadata(**crop_metadata)
+        result.crop_applied = crop_metadata.get('crop_applied', False)
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Erreur lors du traitement dans le worker: {e}", exc_info=True)
+        # Créer un résultat d'erreur
+        return GeometryOutput(
+            status='error',
+            input_path=original_input_path,
+            output_path='',
+            output_transformed_path='',
+            transform_file='',
+            qa_file='',
+            crop_applied=False,
+            crop_metadata=CropMetadata(**crop_metadata) if crop_metadata else CropMetadata(
+                crop_applied=False,
+                area_ratio=0.0,
+                status='error'
+            ),
+            deskew_applied=False,
+            deskew_angle=0.0,
+            deskew_metadata=DeskewMetadata(
+                deskew_applied=False,
+                angle=0.0,
+                confidence=0.0,
+                status='error'
+            ),
+            orientation_detected=False,
+            angle=0,
+            rotation_applied=False,
+            transforms={},
+            qa_flags={},
+            processing_time=0.0,
+            error=str(e)
+        )
 
 
 @dataclass
@@ -1510,72 +1639,186 @@ class GeometryNormalizer:
                 capture_types=capture_types_list
             )
             
-            # Traiter chaque image individuellement pour le reste du pipeline
-            # (deskew, orientation, rotation)
-            for i, (file_path, img, metadata_info, crop_meta) in enumerate(
-                zip(batch_file_paths, cropped_images, batch_metadata, crop_metadata_list)
+            # OPTIMISATION MAJEURE : Parallélisation du reste du pipeline avec ProcessPoolExecutor
+            # Après le crop batch, on traite deskew, orientation et rotation en parallèle
+            tasks = []
+            for file_path, img, metadata_info, crop_meta in zip(
+                batch_file_paths, cropped_images, batch_metadata, crop_metadata_list
             ):
+                # Générer les chemins de sortie
+                base_output = get_output_path(file_path, output_dir)
+                path_obj = Path(base_output)
+                output_transformed_path = str(path_obj.with_stem(f"{path_obj.stem}_transformed"))
+                
+                # Préparer la tâche pour le worker
+                tasks.append((
+                    img,
+                    metadata_info,
+                    output_transformed_path,
+                    metadata_info['original_input_path'],
+                    crop_meta
+                ))
+            
+            # Seuil de parallélisation : pour les petits lots, le traitement séquentiel est plus rapide
+            # car l'overhead de création des processus dépasse le gain de parallélisation
+            # Utiliser le seuil de parallélisation depuis la configuration
+            parallelization_threshold = self.perf_config.parallelization_threshold
+            
+            if len(tasks) < parallelization_threshold:
+                # Traitement séquentiel pour les petits lots
+                logger.info(f"Traitement séquentiel de {len(tasks)} image(s) (seuil de parallélisation: {parallelization_threshold})")
+                batch_results = []
+                for file_path, img, metadata_info, crop_meta in zip(
+                    batch_file_paths, cropped_images, batch_metadata, crop_metadata_list
+                ):
+                    try:
+                        base_output = get_output_path(file_path, output_dir)
+                        path_obj = Path(base_output)
+                        output_transformed_path = str(path_obj.with_stem(f"{path_obj.stem}_transformed"))
+                        output_original_path = str(path_obj.with_stem(f"{path_obj.stem}_original"))
+                        
+                        self._current_output_original_path = output_original_path
+                        
+                        result = self.process(
+                            img=img,
+                            output_path=output_transformed_path,
+                            capture_type=metadata_info['capture_type'],
+                            original_input_path=metadata_info['original_input_path'],
+                            capture_info=metadata_info.get('capture_info')
+                        )
+                        
+                        result.output_original_path = output_original_path
+                        result.output_transformed_path = output_transformed_path
+                        result.crop_metadata = CropMetadata(**crop_meta)
+                        result.crop_applied = crop_meta.get('crop_applied', False)
+                        
+                        batch_results.append(result)
+                    except Exception as e:
+                        logger.error(f"Erreur lors du traitement séquentiel de {file_path}: {e}", exc_info=True)
+                        error_output = GeometryOutput(
+                            status='error',
+                            input_path=file_path,
+                            output_path='',
+                            output_transformed_path='',
+                            transform_file='',
+                            qa_file='',
+                            crop_applied=False,
+                            crop_metadata=CropMetadata(**crop_meta) if crop_meta else CropMetadata(
+                                crop_applied=False,
+                                area_ratio=0.0,
+                                status='error'
+                            ),
+                            deskew_applied=False,
+                            deskew_angle=0.0,
+                            deskew_metadata=DeskewMetadata(
+                                deskew_applied=False,
+                                angle=0.0,
+                                confidence=0.0,
+                                status='error'
+                            ),
+                            orientation_detected=False,
+                            angle=0,
+                            rotation_applied=False,
+                            transforms={},
+                            qa_flags={},
+                            processing_time=0.0,
+                            error=str(e)
+                        )
+                        batch_results.append(error_output)
+                
+                # Ajouter les résultats
+                results.extend(batch_results)
+            else:
+                # Traitement parallèle pour les gros lots
+                # Utiliser ProcessPoolExecutor pour traiter les images en parallèle
+                num_workers = self.perf_config.max_workers
+                if num_workers <= 0:
+                    num_workers = os.cpu_count() or 1
+                
+                # Convertir les configurations en dictionnaires pour la sérialisation
+                init_args = (
+                    asdict(self.geo_config),
+                    asdict(self.qa_config),
+                    asdict(self.perf_config),
+                    asdict(self.output_config)
+                )
+                
+                logger.info(f"Traitement parallèle de {len(tasks)} images avec {num_workers} workers")
+                
                 try:
-                    # Générer les chemins de sortie
-                    base_output = get_output_path(file_path, output_dir)
-                    path_obj = Path(base_output)
-                    
-                    output_transformed_path = str(path_obj.with_stem(f"{path_obj.stem}_transformed"))
-                    output_original_path = str(path_obj.with_stem(f"{path_obj.stem}_original"))
-                    
-                    # Stocker le chemin original pour l'utiliser dans process()
-                    self._current_output_original_path = output_original_path
-                    
-                    # Traiter l'image avec le reste du pipeline
-                    result = self.process(
-                        img=img,
-                        output_path=output_transformed_path,
-                        capture_type=metadata_info['capture_type'],
-                        original_input_path=metadata_info['original_input_path'],
-                        capture_info=metadata_info['capture_info']
-                    )
-                    
-                    # Mettre à jour les chemins et les métadonnées de crop
-                    result.output_original_path = output_original_path
-                    result.output_transformed_path = output_transformed_path
-                    result.crop_metadata = CropMetadata(**crop_meta)
-                    result.crop_applied = crop_meta.get('crop_applied', False)
-                    
-                    results.append(result)
+                    with ProcessPoolExecutor(
+                        max_workers=num_workers,
+                        initializer=init_geometry_worker,
+                        initargs=init_args
+                    ) as executor:
+                        # Traiter toutes les images en parallèle
+                        batch_results = list(executor.map(process_single_image_geometry, tasks))
+                        
+                        # Ajouter les résultats
+                        results.extend(batch_results)
                     
                 except Exception as e:
-                    logger.error(f"Erreur lors du traitement de {file_path}", exc_info=True)
-                    # Créer un résultat d'erreur
-                    error_output = GeometryOutput(
-                        status='error',
-                        input_path=file_path,
-                        output_path='',
-                        output_transformed_path='',
-                        transform_file='',
-                        qa_file='',
-                        crop_applied=False,
-                        crop_metadata=CropMetadata(**crop_meta) if crop_meta else CropMetadata(
-                            crop_applied=False,
-                            area_ratio=0.0,
-                            status='error'
-                        ),
-                        deskew_applied=False,
-                        deskew_angle=0.0,
-                        deskew_metadata=DeskewMetadata(
-                            deskew_applied=False,
-                            angle=0.0,
-                            confidence=0.0,
-                            status='error'
-                        ),
-                        orientation_detected=False,
-                        angle=0,
-                        rotation_applied=False,
-                        transforms={},
-                        qa_flags={},
-                        processing_time=0.0,
-                        error=str(e)
-                    )
-                    results.append(error_output)
+                    logger.error(f"Erreur lors du traitement parallèle: {e}", exc_info=True)
+                    # En cas d'erreur, traiter séquentiellement en fallback
+                    logger.warning("Basculement vers le traitement séquentiel en raison d'une erreur")
+                    for file_path, img, metadata_info, crop_meta in zip(
+                        batch_file_paths, cropped_images, batch_metadata, crop_metadata_list
+                    ):
+                        try:
+                            base_output = get_output_path(file_path, output_dir)
+                            path_obj = Path(base_output)
+                            output_transformed_path = str(path_obj.with_stem(f"{path_obj.stem}_transformed"))
+                            output_original_path = str(path_obj.with_stem(f"{path_obj.stem}_original"))
+                            
+                            self._current_output_original_path = output_original_path
+                            
+                            result = self.process(
+                                img=img,
+                                output_path=output_transformed_path,
+                                capture_type=metadata_info['capture_type'],
+                                original_input_path=metadata_info['original_input_path'],
+                                capture_info=metadata_info.get('capture_info')
+                            )
+                            
+                            result.output_original_path = output_original_path
+                            result.output_transformed_path = output_transformed_path
+                            result.crop_metadata = CropMetadata(**crop_meta)
+                            result.crop_applied = crop_meta.get('crop_applied', False)
+                            
+                            results.append(result)
+                            
+                        except Exception as inner_e:
+                            logger.error(f"Erreur lors du traitement séquentiel de {file_path}: {inner_e}", exc_info=True)
+                            error_output = GeometryOutput(
+                                status='error',
+                                input_path=file_path,
+                                output_path='',
+                                output_transformed_path='',
+                                transform_file='',
+                                qa_file='',
+                                crop_applied=False,
+                                crop_metadata=CropMetadata(**crop_meta) if crop_meta else CropMetadata(
+                                    crop_applied=False,
+                                    area_ratio=0.0,
+                                    status='error'
+                                ),
+                                deskew_applied=False,
+                                deskew_angle=0.0,
+                                deskew_metadata=DeskewMetadata(
+                                    deskew_applied=False,
+                                    angle=0.0,
+                                    confidence=0.0,
+                                    status='error'
+                                ),
+                                orientation_detected=False,
+                                angle=0,
+                                rotation_applied=False,
+                                transforms={},
+                                qa_flags={},
+                                processing_time=0.0,
+                                error=str(inner_e)
+                            )
+                            results.append(error_output)
         
         return results
     

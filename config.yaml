@@ -206,6 +206,12 @@ performance:
   # Lower values (e.g., 2) use less CPU but may be slower.
   # Should not exceed the number of CPU cores.
   max_workers: 4
+  # Minimum number of items (pages/images) required to trigger parallel processing.
+  # Below this threshold, sequential processing is used to avoid the overhead of process creation.
+  # Higher values (e.g., 5) reduce parallelization overhead but may miss opportunities for speedup.
+  # Lower values (e.g., 1) parallelize more aggressively but may create unnecessary overhead.
+  # Optimal value depends on CPU, I/O, and document complexity.
+  parallelization_threshold: 2
   # Load models only when needed (lazy loading).
   # When true, models are loaded on first use, reducing initial startup time and memory usage.
   # When false, all models are loaded at startup, increasing initial memory but ensuring models are ready.

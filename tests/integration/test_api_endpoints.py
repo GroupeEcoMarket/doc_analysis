@@ -87,7 +87,7 @@ def test_pipeline_geometry_endpoint(client, test_file_path):
     
     with open(test_file_path, "rb") as test_file:
         response = client.post(
-            "/api/v1/pipeline/geometry",
+            "/api/v1/pipeline/geometry?sync=true",  # Utiliser le mode synchrone pour le test d'intégration
             files={"file": (test_file_path.name, test_file, mime_type)}
         )
     

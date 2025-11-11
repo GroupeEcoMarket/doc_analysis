@@ -78,10 +78,18 @@ doc_analysis/
 
 **Classe**: `GeometryNormalizer`
 - `process(img, output_path, capture_type, original_input_path, capture_info)`: Traite une image déjà chargée
-- `process_batch(input_dir, output_dir)`: Traite un lot d'images prétraitées
+- `process_batch(input_dir, output_dir)`: Traite un lot d'images prétraitées avec parallélisation
 
 **Entrée**: Images prétraitées depuis l'étape preprocessing (avec métadonnées JSON)
 **Sortie**: Images normalisées géométriquement avec fichiers de transformation et QA
+
+**Optimisations de Performance** :
+- **Inférence par lots (Batch Inference)** : Le crop intelligent est traité en batch pour toutes les images d'un lot en une seule passe du modèle, optimisant l'utilisation du GPU/CPU
+- **Parallélisation avec ProcessPoolExecutor** : Après le crop batch, les étapes de deskew, orientation et rotation sont traitées en parallèle sur plusieurs processus workers
+  - Chaque worker initialise ses propres modèles (ONNX, doctr) pour éviter les problèmes de partage entre processus
+  - Le nombre de workers est configuré via `performance.max_workers` dans `config.yaml`
+  - En cas d'erreur du pool de processus, le système bascule automatiquement vers un traitement séquentiel (fallback)
+- **Gestion robuste des erreurs** : Si une image échoue pendant le traitement parallèle, les autres images continuent d'être traitées normalement
 
 ### Extraction de Features (`features.py`)
 
@@ -132,6 +140,16 @@ Fonctions utilitaires pour :
 - Listing de fichiers avec filtres d'extensions
 - Génération de chemins de sortie
 
+### Initialisation des Workers (`utils/worker_init.py`)
+
+Module partagé pour l'initialisation des workers dans le multiprocessing :
+- `create_geometry_normalizer_from_dicts()` : Crée un `GeometryNormalizer` depuis des configurations sérialisées
+- `create_api_dependencies_from_config()` : Crée les dépendances API (FeatureExtractor, DocumentClassifier)
+- `log_worker_initialization()` : Logging standardisé pour l'initialisation des workers
+- `get_config_dicts_from_config()` : Convertit un objet `Config` en dictionnaires sérialisables
+
+Ce module centralise la logique d'initialisation pour éviter la duplication entre les différents modules (API routes, geometry pipeline).
+
 ## Flux de données
 
 ```
@@ -158,6 +176,8 @@ Document brut (PDF/Image)
 2. **Géométrie** :
    - Lit les images prétraitées et leurs métadonnées JSON
    - Utilise le `capture_type` pour décider si le crop doit être appliqué
+   - **Phase 1 - Crop Batch** : Traite toutes les images en batch pour le crop intelligent (une seule passe du modèle)
+   - **Phase 2 - Parallélisation** : Traite deskew, orientation et rotation en parallèle avec `ProcessPoolExecutor`
    - Applique les transformations géométriques (crop, deskew, rotation)
    - Sauvegarde les images transformées + fichiers de transformation + QA
 
@@ -199,6 +219,19 @@ L'architecture permet d'ajouter facilement :
 - Métadonnées JSON avec `capture_type` et `capture_info`
 
 **Note** : Le module ne charge plus directement les images depuis des fichiers. Il reçoit les images déjà chargées et les métadonnées depuis l'étape preprocessing.
+
+**Architecture de Parallélisation** :
+- **Module partagé** : `src/utils/worker_init.py` centralise la logique d'initialisation des workers
+- **Fonctions worker** :
+  - `init_geometry_worker()` : Initialise un `GeometryNormalizer` dans chaque processus worker avec ses propres modèles
+  - `process_single_image_geometry()` : Traite une seule image (deskew, orientation, rotation) dans un worker
+- **Processus de traitement** :
+  1. Chargement des images en batch
+  2. Crop intelligent en batch (toutes les images en une passe)
+  3. Distribution des images croppées aux workers via `ProcessPoolExecutor`
+  4. Traitement parallèle de deskew/orientation/rotation
+  5. Collecte des résultats et gestion des erreurs individuelles
+- **Configuration** : Le nombre de workers est défini par `performance.max_workers` dans `config.yaml`
 
 ## Prochaines étapes de développement
 

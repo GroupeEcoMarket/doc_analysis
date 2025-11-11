@@ -62,6 +62,7 @@ class PerformanceConfig:
     """Configuration pour les performances"""
     batch_size: int
     max_workers: int
+    parallelization_threshold: int
     lazy_load_models: bool
 
 
@@ -176,6 +177,7 @@ class Config:
         return PerformanceConfig(
             batch_size=perf.get('batch_size', 10),
             max_workers=perf.get('max_workers', 4),
+            parallelization_threshold=perf.get('parallelization_threshold', 2),
             lazy_load_models=perf.get('lazy_load_models', True)
         )
     

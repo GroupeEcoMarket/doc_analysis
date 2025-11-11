@@ -2,9 +2,9 @@
 API routes for document analysis
 """
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks, Depends
+from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks, Depends, Response
 from fastapi.responses import JSONResponse
-from typing import Optional, Dict, Any, List, Tuple, Annotated
+from typing import Optional, Dict, Any, List, Tuple, Annotated, Union
 from pydantic import BaseModel, Field
 import os
 from pathlib import Path
@@ -35,6 +35,7 @@ from src.utils.exceptions import (
     PipelineError
 )
 from src.utils.pdf_handler import is_pdf
+from src.utils.config_loader import Config
 
 logger = get_logger(__name__)
 
@@ -55,20 +56,27 @@ worker_dependencies = {}
 def init_api_worker():
     """
     Initialise les dépendances (modèles lourds) une seule fois par processus worker.
+    
+    Utilise les utilitaires partagés de src.utils.worker_init pour éviter la duplication.
     """
     global worker_dependencies
+    
     if 'feature_extractor' not in worker_dependencies:
-        print(f"Initialisation des modèles pour le worker PID: {os.getpid()}")
-        # On utilise les fonctions de dépendances pour recréer les objets
+        from src.utils.worker_init import (
+            create_api_dependencies_from_config,
+            log_worker_initialization
+        )
+        
+        # Charger la configuration
         config = get_app_config()
-        worker_dependencies['feature_extractor'] = get_feature_extractor(config)
-        try:
-            worker_dependencies['document_classifier'] = get_document_classifier(config)
-        except ValueError:
-            # Gérer le cas où la classification est désactivée
-            worker_dependencies['document_classifier'] = None
+        
+        # Créer les dépendances en utilisant la fonction partagée
+        dependencies = create_api_dependencies_from_config(config)
+        worker_dependencies.update(dependencies)
+        
+        log_worker_initialization('api')
     else:
-        print(f"Modèles déjà initialisés pour le worker PID: {os.getpid()}")
+        logger.debug(f"Modèles déjà initialisés pour le worker PID: {os.getpid()}")
 
 
 def process_page_worker(page_tuple: Tuple[int, np.ndarray]) -> Tuple[int, Dict[str, Any]]:
@@ -459,13 +467,17 @@ async def pipeline_colometry(file: UploadFile = File(...)) -> NotImplementedResp
 
 @router.post(
     "/pipeline/geometry",
-    response_model=GeometryResponse,
+    response_model=None,  # Désactiver la génération automatique car on retourne Union[GeometryResponse, JSONResponse]
     summary="Document Geometry Normalization",
     description="""
     Accepts an image or PDF file, applies preprocessing (enhancement, contrast improvement, classification)
     then performs geometry normalization (crop, deskew, rotation).
     
-    Returns processing metadata and paths to generated files.
+    **By default, this endpoint is asynchronous** and returns immediately with a task_id.
+    Use GET /results/{task_id} to check the status and retrieve results.
+    
+    For backward compatibility, you can use `?sync=true` to get synchronous behavior
+    (returns results directly, but may timeout for large documents).
     
     **Processing Steps:**
     
@@ -487,7 +499,15 @@ async def pipeline_colometry(file: UploadFile = File(...)) -> NotImplementedResp
     - Accepts image files (PNG, JPG, JPEG, TIFF, BMP) or PDF files
     - PDFs are converted to images at 300 DPI
     
-    **Output:**
+    **Query Parameters:**
+    - **sync** (optional, default: false): If true, returns results synchronously (for backward compatibility).
+      If false (default), returns a task_id immediately and processes asynchronously.
+    
+    **Output (Async mode, default):**
+    - Returns 202 Accepted with a task_id
+    - Use GET /results/{task_id} to check status and get results
+    
+    **Output (Sync mode, sync=true):**
     - **transformed:** Path to the final processed image after all transformations
     - **original:** Path to the original image (if saved)
     - **transform_file:** JSON file containing all applied transformations
@@ -508,10 +528,14 @@ async def pipeline_geometry(
     background_tasks: BackgroundTasks,
     preprocessing_normalizer: Annotated[PreprocessingNormalizer, Depends(get_preprocessing_normalizer)],
     geometry_normalizer: Annotated[GeometryNormalizer, Depends(get_geometry_normalizer)],
-    file: UploadFile = File(...)
-) -> GeometryResponse:
+    file: UploadFile = File(...),
+    sync: bool = False
+) -> Union[GeometryResponse, JSONResponse]:
     """
-    Process document geometry normalization (synchronous for backward compatibility).
+    Process document geometry normalization.
+    
+    By default, processes asynchronously and returns a task_id.
+    Use sync=true for synchronous processing (backward compatibility).
     """
     # Create service with injected dependencies
     service = ProcessingService(
@@ -538,46 +562,89 @@ async def pipeline_geometry(
             temp_dirs['input']
         )
         
-        # 4. Process document
-        response_data = service.process_geometry(
-            temp_file_path,
-            file.filename,
-            temp_dirs
-        )
-        
-        # 5. Schedule cleanup after response is sent
-        background_tasks.add_task(cleanup_temp_files, temp_dirs)
-        
-        return response_data
+        # 4. Process document (async or sync based on parameter)
+        if sync:
+            # Synchronous mode (backward compatibility)
+            logger.info(f"Traitement géométrique synchrone pour {file.filename}")
+            response_data = service.process_geometry(
+                temp_file_path,
+                file.filename,
+                temp_dirs
+            )
+            
+            # Schedule cleanup after response is sent
+            background_tasks.add_task(cleanup_temp_files, temp_dirs)
+            
+            return response_data
+        else:
+            # Asynchronous mode (default)
+            # Create task
+            task_id = task_manager.create_task(file.filename)
+            
+            # Schedule background task for processing
+            # Récupérer le request_id pour le propager à la tâche asynchrone
+            current_request_id = get_request_id()
+            background_tasks.add_task(
+                execute_processing_task_sync,
+                task_id=task_id,
+                file_path=temp_file_path,
+                filename=file.filename,
+                temp_dirs=temp_dirs,
+                preprocessing_normalizer=preprocessing_normalizer,
+                geometry_normalizer=geometry_normalizer,
+                request_id=current_request_id,
+                is_full_analysis=False  # Only geometry processing
+            )
+            
+            logger.info(f"Tâche de géométrie créée: {task_id} pour le fichier {file.filename}")
+            
+            task_response = TaskResponse(
+                task_id=task_id,
+                status=TaskStatus.PENDING.value,
+                message="Geometry normalization task created. Use GET /results/{task_id} to check status."
+            )
+            
+            # Return 202 Accepted for async requests
+            return JSONResponse(
+                status_code=202,
+                content=task_response.model_dump()
+            )
         
     except HTTPException:
         raise
     except (PreprocessingError, GeometryError, ModelLoadingError, ImageProcessingError) as e:
         logger.error(f"Erreur du pipeline: {e}", exc_info=True)
+        # Cleanup on error
+        if temp_dirs:
+            cleanup_temp_files(temp_dirs)
         raise HTTPException(
             status_code=500,
             detail=f"Erreur lors du traitement: {str(e)}"
         )
     except ValueError as e:
         logger.error(f"Erreur de validation: {e}", exc_info=True)
+        # Cleanup on error
+        if temp_dirs:
+            cleanup_temp_files(temp_dirs)
         raise HTTPException(status_code=400, detail=str(e))
     except PipelineError as e:
         logger.error(f"Erreur du pipeline: {e}", exc_info=True)
+        # Cleanup on error
+        if temp_dirs:
+            cleanup_temp_files(temp_dirs)
         raise HTTPException(
             status_code=500,
             detail=f"Erreur du pipeline: {str(e)}"
         )
     except Exception as e:
         logger.error(f"Erreur inattendue lors du traitement géométrique: {e}", exc_info=True)
+        # Cleanup on error
+        if temp_dirs:
+            cleanup_temp_files(temp_dirs)
         raise HTTPException(
             status_code=500,
             detail=f"Erreur interne lors du traitement: {str(e)}"
         )
-    finally:
-        # Cleanup is handled by background task, but ensure cleanup on error
-        if temp_dirs:
-            # Only cleanup on error, otherwise let background task handle it
-            pass
 
 
 def pdf_buffer_to_images(pdf_buffer: bytes, dpi: int = 300) -> List[np.ndarray]:
@@ -752,6 +819,7 @@ async def pipeline_features(
 async def classify_document(
     feature_extractor: Annotated[FeatureExtractor, Depends(get_feature_extractor)],
     document_classifier: Annotated[DocumentClassifier, Depends(get_document_classifier)],
+    app_config: Annotated[Config, Depends(get_app_config)],
     file: UploadFile = File(...)
 ) -> MultiPageClassificationResponse:
     """
@@ -784,9 +852,10 @@ async def classify_document(
         # --- LOGIQUE DE PARALLÉLISATION ---
         # Seuil pragmatique : ne pas lancer de processus pour un petit nombre de pages
         # Le coût de création des processus peut être supérieur au gain.
-        PARALLEL_PROCESSING_THRESHOLD = 2
+        # Le seuil est configurable via performance.parallelization_threshold dans config.yaml
+        parallelization_threshold = app_config.performance.parallelization_threshold
         
-        if num_pages >= PARALLEL_PROCESSING_THRESHOLD:
+        if num_pages >= parallelization_threshold:
             logger.info(f"Traitement parallèle de {num_pages} pages...")
             # Préparer les tâches avec leur index original
             tasks = [(i, images_np[i]) for i in range(num_pages)]

@@ -118,6 +118,7 @@ def mock_performance_config():
     return PerformanceConfig(
         batch_size=10,
         max_workers=4,
+        parallelization_threshold=2,
         lazy_load_models=True,
     )
 

@@ -130,12 +130,12 @@ classification:
   # Path to the trained classification model (saved with joblib).
   # The model should be a scikit-learn compatible classifier (e.g., LGBMClassifier, LogisticRegression).
   # If the path is relative, it will be resolved from the project root.
-  model_path: "models/document_classifier.joblib"
+  model_path: "D:/datasets/doc_analysis/models/document_classifier.joblib"
   # Semantic model for feature engineering (sentence-transformers).
   # This model is used to create semantic embeddings from OCR text.
-  # Recommended models for French: "sentence-transformers/bge-small-fr" (fast, good quality)
+  # Recommended models for French: "antoinelouis/french-me5-base" (fast, good quality)
   # or "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2" (multilingual, smaller)
-  embedding_model: "sentence-transformers/bge-small-fr"
+  embedding_model: "antoinelouis/french-me5-base"
   # Minimum confidence threshold for OCR lines to be included in embeddings.
   # Higher values (e.g., 0.85) are stricter and only use high-confidence text.
   # Lower values (e.g., 0.60) are more lenient but may include incorrectly recognized text.
@@ -237,4 +237,18 @@ output:
   # Lower values (e.g., 80) produce smaller files but may introduce visible compression artifacts.
   # Only used when image_format is "jpg".
   jpeg_quality: 95
+
+# ==========================================
+# PATHS & STORAGE
+# ==========================================
+
+paths:
+  # Données brutes (images/pdf) pour l'entraînement (default: training_data/raw)
+  training_raw_dir: training_data/raw
+
+  # Données préparées (JSON OCR) pour l'entraînement (default: training_data/processed)
+  training_processed_dir: training_data/processed
+
+  # Répertoire de sortie pour les modèles et rapports (default: training_data/artifacts)
+  training_artifacts_dir: training_data/artifacts
 

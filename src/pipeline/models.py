@@ -29,8 +29,9 @@ class CaptureInfo(BaseModel):
     white_percentage_threshold: Optional[float] = Field(None, ge=0.0, le=1.0, description="Seuil de pourcentage de blanc utilisé")
     error: Optional[str] = Field(None, description="Message d'erreur si la classification a échoué")
     
-    class Config:
-        use_enum_values = True
+    model_config = {
+        "use_enum_values": True
+    }
 
 
 class PreprocessingOutput(BaseModel):
@@ -48,8 +49,9 @@ class PreprocessingOutput(BaseModel):
     processing_time: float = Field(..., ge=0.0, description="Temps de traitement en secondes")
     error: Optional[str] = Field(None, description="Message d'erreur si le traitement a échoué")
     
-    class Config:
-        use_enum_values = True
+    model_config = {
+        "use_enum_values": True
+    }
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "PreprocessingOutput":

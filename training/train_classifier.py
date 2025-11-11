@@ -46,6 +46,7 @@ sys.path.insert(0, str(project_root))
 from src.classification.feature_engineering import FeatureEngineer
 from src.pipeline.models import FeaturesOutput, OCRLine
 from src.utils.logger import get_logger
+from src.utils.config_loader import get_config
 
 logger = get_logger(__name__)
 
@@ -304,10 +305,20 @@ def evaluate_model(
         Dict avec les métriques d'évaluation
     """
     # Prédictions
-    if model_type == 'lightgbm':
+    # Détecter automatiquement le type de modèle plutôt que de se fier à model_type
+    if LIGHTGBM_AVAILABLE and isinstance(model, lgb.Booster):
+        # Comportement spécifique à LightGBM
         y_pred_proba = model.predict(X_test)
+        # S'assurer que y_pred_proba est bien en 2D, même pour un seul échantillon
+        if y_pred_proba.ndim == 1:
+            y_pred_proba = y_pred_proba.reshape(1, -1)
         y_pred = np.argmax(y_pred_proba, axis=1)
-    else: # Pour les modèles sklearn
+    elif hasattr(model, 'predict_proba'):
+        # Comportement pour les modèles sklearn qui ont predict_proba
+        y_pred_proba = model.predict_proba(X_test)
+        y_pred = np.argmax(y_pred_proba, axis=1)
+    else:
+        # Fallback pour les modèles qui n'ont que .predict()
         y_pred = model.predict(X_test)
     
     # Métriques
@@ -316,7 +327,8 @@ def evaluate_model(
 
     feature_importance_results = {}
     
-    if model_type == 'lightgbm' and hasattr(model, 'feature_importance'):
+    # Détecter automatiquement le type de modèle pour les feature importances
+    if LIGHTGBM_AVAILABLE and isinstance(model, lgb.Booster) and hasattr(model, 'feature_importance'):
         feature_importances = model.feature_importance(importance_type='gain')
         
         # La dimension totale est la largeur de X_test. On soustrait les 4 features de position.
@@ -450,25 +462,36 @@ def save_model_and_report(
 
 def main():
     """Point d'entrée principal du script d'entraînement."""
+    # Charger la config pour obtenir les chemins par défaut
+    config = get_config()
+    default_data_dir = config.get('paths.training_processed_dir', 'training_data/processed')
+    default_model_dir = config.get('paths.training_artifacts_dir', 'training_data/artifacts')
+    
+    # Récupérer les valeurs par défaut depuis la config pour classification
+    classification_config = config.get('classification', {})
+    default_embedding_model = classification_config.get('embedding_model', 'antoinelouis/french-me5-base')
+    default_min_confidence = classification_config.get('min_confidence', 0.70)
+    
     parser = argparse.ArgumentParser(
         description="Entraîne un modèle de classification de documents"
     )
     parser.add_argument(
-        'data_dir',
+        '--data-dir',
         type=str,
-        help="Répertoire contenant les données d'entraînement (sous-dossiers par type)"
+        default=default_data_dir,
+        help=f"Répertoire contenant les données d'entraînement (sous-dossiers par type) (défaut: {default_data_dir})"
     )
     parser.add_argument(
         '--model-path',
         type=str,
-        default='models/document_classifier.joblib',
-        help="Chemin pour sauvegarder le modèle (défaut: models/document_classifier.joblib)"
+        default=str(Path(default_model_dir) / 'document_classifier.joblib'),
+        help=f"Chemin pour sauvegarder le modèle (défaut: {Path(default_model_dir) / 'document_classifier.joblib'})"
     )
     parser.add_argument(
         '--report-path',
         type=str,
-        default='models/training_report.json',
-        help="Chemin pour sauvegarder le rapport (défaut: models/training_report.json)"
+        default=str(Path(default_model_dir) / 'training_report.json'),
+        help=f"Chemin pour sauvegarder le rapport (défaut: {Path(default_model_dir) / 'training_report.json'})"
     )
     parser.add_argument(
         '--model-type',
@@ -490,16 +513,16 @@ def main():
         help="Seed aléatoire pour la reproductibilité (défaut: 42)"
     )
     parser.add_argument(
-        '--semantic-model',
+        '--embedding-model',
         type=str,
-        default='sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2',
-        help="Modèle sentence-transformers à utiliser (défaut: paraphrase-multilingual-MiniLM-L12-v2)"
+        default=default_embedding_model,
+        help=f"Modèle sentence-transformers à utiliser (défaut depuis config.yaml: {default_embedding_model})"
     )
     parser.add_argument(
         '--min-confidence',
         type=float,
-        default=0.70,
-        help="Seuil de confiance minimum pour filtrer les lignes OCR (défaut: 0.70)"
+        default=default_min_confidence,
+        help=f"Seuil de confiance minimum pour filtrer les lignes OCR (défaut depuis config.yaml: {default_min_confidence})"
     )
     parser.add_argument(
         '--workers',
@@ -514,13 +537,27 @@ def main():
     try:
         # On passe les paramètres à la place de l'objet FeatureEngineer
         feature_engineer_params = {
-            'semantic_model_name': args.semantic_model,
+            'semantic_model_name': args.embedding_model,
             'min_confidence': args.min_confidence
         }
         
         # Charger et vectoriser les données en parallèle
         print("\n📚 Chargement et vectorisation des données d'entraînement...")
         X, y, class_names = load_training_data(args.data_dir, feature_engineer_params, num_workers=args.workers)
+        
+        # Vérifier si le jeu de test sera assez grand pour la stratification
+        n_samples = len(X)
+        n_classes = len(class_names)
+        test_samples = int(np.ceil(n_samples * args.test_size))
+        
+        if test_samples < n_classes:
+            raise ValueError(
+                f"Le jeu de données est trop petit pour créer un jeu de test stratifié. "
+                f"Avec {n_samples} documents et un test_size de {args.test_size}, "
+                f"le jeu de test n'aurait que {test_samples} échantillon(s), "
+                f"ce qui est inférieur au nombre de classes ({n_classes}). "
+                f"Augmentez la taille de votre jeu de données ou ajustez test_size."
+            )
         
         # Split train/test
         print(f"\n✂️  Division train/test (test_size={args.test_size})...")

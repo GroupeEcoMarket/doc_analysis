@@ -195,23 +195,30 @@ def prepare_training_data(
         print(f"[WARNING] {total_errors} erreurs rencontrees")
     print(f"\nLes donnees sont pretes dans: {output_dir}")
     print(f"\nVous pouvez maintenant entrainer le modele avec:")
-    print(f"  poetry run python training/train_classifier.py {output_dir}")
+    print(f"  poetry run python training/train_classifier.py --data-dir {output_dir}")
 
 
 def main():
     """Point d'entrée principal du script."""
+    # Charger la config pour obtenir les chemins par défaut
+    config = get_config()
+    default_input_dir = config.get('paths.training_raw_dir', 'training_data/raw')
+    default_output_dir = config.get('paths.training_processed_dir', 'training_data/processed')
+    
     parser = argparse.ArgumentParser(
         description="Prépare les données d'entraînement en extrayant les features OCR des images"
     )
     parser.add_argument(
-        'input_dir',
+        '--input-dir',
         type=str,
-        help="Répertoire contenant les sous-dossiers d'images par type"
+        default=default_input_dir,
+        help=f"Répertoire contenant les sous-dossiers d'images par type (défaut: {default_input_dir})"
     )
     parser.add_argument(
-        'output_dir',
+        '--output-dir',
         type=str,
-        help="Répertoire de sortie pour les fichiers JSON"
+        default=default_output_dir,
+        help=f"Répertoire de sortie pour les fichiers JSON (défaut: {default_output_dir})"
     )
     parser.add_argument(
         '--config',

@@ -172,7 +172,7 @@ class QAReportGenerator:
         # Générer le tableau des flags
         flags_table = self._generate_flags_table() if self.pages_data else '<p>Aucune donnée disponible</p>'
         
-        html = f"""<!DOCTYPE html>
+        html = r"""<!DOCTYPE html>
 <html lang="fr">
 <head>
     <meta charset="UTF-8">

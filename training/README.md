@@ -123,7 +123,7 @@ poetry run python training/train_classifier.py training_data/
 - `--report-path PATH`: Chemin pour sauvegarder le rapport (défaut: `models/training_report.json`)
 - `--model-type TYPE`: Type de modèle (`lightgbm`, `logistic_regression`, `random_forest`)
 - `--test-size FLOAT`: Proportion des données pour le test (défaut: 0.2)
-- `--semantic-model NAME`: Modèle sentence-transformers (défaut: `paraphrase-multilingual-MiniLM-L12-v2`)
+- `--embedding-model NAME`: Modèle sentence-transformers (défaut: `antoinelouis/french-me5-base`)
 - `--min-confidence FLOAT`: Seuil de confiance OCR (défaut: 0.70)
 
 **Exemples :**
@@ -145,7 +145,7 @@ poetry run python training/train_classifier.py training_data/ \
 
 # Utiliser un modèle sentence-transformers différent
 poetry run python training/train_classifier.py training_data/ \
-    --semantic-model sentence-transformers/paraphrase-multilingual-mpnet-base-v2
+    --embedding-model antoinelouis/french-me5-base
 ```
 
 ## Format des Données d'Entraînement

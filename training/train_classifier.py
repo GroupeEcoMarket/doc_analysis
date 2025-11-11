@@ -10,6 +10,7 @@ Ce script :
 
 import json
 import argparse
+import os
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
 import numpy as np
@@ -50,31 +51,55 @@ from src.utils.config_loader import get_config
 
 logger = get_logger(__name__)
 
+# Variable globale pour le worker (sera initialisée par init_worker)
+worker_feature_engineer = None
+
+
+def init_worker(semantic_model_name: str, min_confidence: float):
+    """
+    Fonction d'initialisation pour chaque worker du Pool.
+    Charge le FeatureEngineer (et donc le modèle) une seule fois.
+    
+    Args:
+        semantic_model_name: Nom du modèle sentence-transformers à utiliser
+        min_confidence: Seuil de confiance minimum pour filtrer les lignes OCR
+    """
+    global worker_feature_engineer
+    # Créer un logger pour ce worker (nécessaire car on est dans un processus séparé)
+    worker_logger = get_logger(__name__)
+    worker_logger.debug(f"[Worker PID: {os.getpid()}] Initialisation du FeatureEngineer...")
+    worker_feature_engineer = FeatureEngineer(
+        semantic_model_name=semantic_model_name,
+        min_confidence=min_confidence
+    )
+    worker_logger.debug(f"[Worker PID: {os.getpid()}] FeatureEngineer prêt.")
+
 
 def process_json_file(file_path_tuple):
     """
     Worker function to load and vectorize a single JSON file.
-    Initializes its own FeatureEngineer.
+    Utilise le FeatureEngineer global initialisé par init_worker.
     
     Args:
-        file_path_tuple: Tuple of (json_file, doc_type, class_idx, semantic_model_name, min_confidence)
+        file_path_tuple: Tuple of (json_file, doc_type, class_idx)
     
     Returns:
         Tuple of (embedding, class_idx) or None if error
     """
-    json_file, doc_type, class_idx, semantic_model_name, min_confidence = file_path_tuple
+    json_file, doc_type, class_idx = file_path_tuple
     
     try:
-        # Chaque worker initialise son propre FeatureEngineer. C'est plus robuste.
-        feature_engineer = FeatureEngineer(
-            semantic_model_name=semantic_model_name,
-            min_confidence=min_confidence
-        )
+        # Utiliser l'instance globale du worker
+        global worker_feature_engineer
+        if worker_feature_engineer is None:
+            # Sécurité si l'initialisation a échoué
+            raise RuntimeError("FeatureEngineer non initialisé dans le worker.")
         
         with open(json_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
         
-        embedding = feature_engineer.extract_document_embedding(data)
+        # Utiliser l'instance partagée
+        embedding = worker_feature_engineer.extract_document_embedding(data)
         
         return (embedding, class_idx)
     except Exception as e:
@@ -128,7 +153,7 @@ def load_training_data(
             "Structure attendue: data_dir/TypeDocument/*.json"
         )
     
-    print(f"📁 Découverte de {len(type_dirs)} types de documents")
+    logger.info(f"Découverte de {len(type_dirs)} types de documents")
     
     # Préparer la liste de toutes les tâches à effectuer
     tasks = []
@@ -147,27 +172,29 @@ def load_training_data(
         
         # Parcourir les fichiers JSON dans ce dossier
         json_files = list(type_dir.glob('*.json'))
-        print(f"  {doc_type}: {len(json_files)} fichiers")
+        logger.info(f"  {doc_type}: {len(json_files)} fichiers")
         
         for json_file in json_files:
-            tasks.append((
-                json_file,
-                doc_type,
-                class_idx,
-                feature_engineer_params['semantic_model_name'],
-                feature_engineer_params['min_confidence']
-            ))
+            # Le tuple ne contient plus les paramètres du modèle (ils sont passés via initargs)
+            tasks.append((json_file, doc_type, class_idx))
     
     if not tasks:
         raise ValueError("Aucun document .json trouvé dans les données d'entraînement")
     
-    print(f"\n⚡ Vectorisation de {len(tasks)} documents en parallèle avec {num_workers} workers...")
+    logger.info(f"Vectorisation de {len(tasks)} documents en parallèle avec {num_workers} workers...")
     
     X_list = []
     y_list = []
     
-    # Utiliser le Pool pour exécuter les tâches en parallèle
-    with Pool(processes=num_workers) as pool:
+    # Utiliser le Pool avec initializer pour partager le modèle entre les workers
+    with Pool(
+        processes=num_workers,
+        initializer=init_worker,
+        initargs=(
+            feature_engineer_params['semantic_model_name'],
+            feature_engineer_params['min_confidence']
+        )
+    ) as pool:
         # tqdm ajoute une barre de progression
         # imap_unordered retourne les résultats dès qu'ils sont prêts pour un feedback en temps réel
         results = list(tqdm(pool.imap_unordered(process_json_file, tasks), total=len(tasks), desc="Vectorisation"))
@@ -186,12 +213,12 @@ def load_training_data(
     X = np.array(X_list)
     y = np.array(y_list)
     
-    print(f"\n✅ Données chargées: {len(X)} documents, {len(class_names)} classes")
-    print(f"   Dimensions des embeddings: {X.shape[1]}")
-    print(f"   Distribution des classes:")
+    logger.info(f"Données chargées: {len(X)} documents, {len(class_names)} classes")
+    logger.info(f"Dimensions des embeddings: {X.shape[1]}")
+    logger.info("Distribution des classes:")
     for class_name in class_names:
         count = np.sum(y == class_to_idx[class_name])
-        print(f"     {class_name}: {count} documents")
+        logger.info(f"  {class_name}: {count} documents")
     
     return X, y, class_names
 
@@ -214,7 +241,7 @@ def train_model(
     Returns:
         Modèle entraîné
     """
-    print(f"\n🔧 Entraînement d'un modèle {model_type}...")
+    logger.info(f"Entraînement d'un modèle {model_type}...")
     
     if model_type == 'lightgbm':
         if not LIGHTGBM_AVAILABLE:
@@ -280,7 +307,7 @@ def train_model(
             "Choix: 'lightgbm', 'logistic_regression', 'random_forest'"
         )
     
-    print("✅ Modèle entraîné avec succès")
+    logger.info("Modèle entraîné avec succès")
     return model
 
 
@@ -366,12 +393,18 @@ def evaluate_model(
                 'position_percent': (pos_importance / total_importance) * 100,
             }
 
+    # Créer la liste des labels numériques attendus (de 0 à N-1)
+    # C'est la liste de TOUTES les classes possibles
+    # Pour éviter les erreurs de classification si une classe n'est pas presente dans le jeu de test
+    all_labels = [i for i in range(len(class_names))]
+
     # Rapport de classification
     report = classification_report(
         y_test,
         y_pred,
         target_names=class_names,
-        output_dict=True
+        output_dict=True,
+        labels=all_labels
     )
     
     # Matrice de confusion
@@ -415,7 +448,7 @@ def save_model_and_report(
     model_file.parent.mkdir(parents=True, exist_ok=True)
     
     joblib.dump(model_data, model_file)
-    print(f"💾 Modèle sauvegardé: {model_path}")
+    logger.info(f"Modèle sauvegardé: {model_path}")
     
     # Sauvegarder le rapport
     report_data = {
@@ -437,28 +470,28 @@ def save_model_and_report(
     with open(report_file, 'w', encoding='utf-8') as f:
         json.dump(report_data, f, indent=2, ensure_ascii=False)
     
-    print(f"📊 Rapport sauvegardé: {report_path}")
+    logger.info(f"Rapport sauvegardé: {report_path}")
     
     # Afficher un résumé
-    print("\n" + "="*60)
-    print("📈 RÉSUMÉ DES PERFORMANCES")
-    print("="*60)
-    print(f"Accuracy: {metrics['accuracy']:.4f}")
-    print(f"F1-Score (weighted): {metrics['f1_score']:.4f}")
-    print("\nRapport par classe:")
+    logger.info("="*60)
+    logger.info("RÉSUMÉ DES PERFORMANCES")
+    logger.info("="*60)
+    logger.info(f"Accuracy: {metrics['accuracy']:.4f}")
+    logger.info(f"F1-Score (weighted): {metrics['f1_score']:.4f}")
+    logger.info("Rapport par classe:")
     for class_name in class_names:
         if class_name in metrics['classification_report']:
             cls_metrics = metrics['classification_report'][class_name]
-            print(f"  {class_name}:")
-            print(f"    Precision: {cls_metrics.get('precision', 0):.4f}")
-            print(f"    Recall: {cls_metrics.get('recall', 0):.4f}")
-            print(f"    F1-Score: {cls_metrics.get('f1-score', 0):.4f}")
+            logger.info(f"  {class_name}:")
+            logger.info(f"    Precision: {cls_metrics.get('precision', 0):.4f}")
+            logger.info(f"    Recall: {cls_metrics.get('recall', 0):.4f}")
+            logger.info(f"    F1-Score: {cls_metrics.get('f1-score', 0):.4f}")
 
     feature_importances = metrics.get('feature_importance', {})
     if feature_importances:
-        print("\n--- Importance des Features ---")
-        print(f"  Importance relative du Texte    : {feature_importances.get('text_percent', 0):.2f}%")
-        print(f"  Importance relative de la Position : {feature_importances.get('position_percent', 0):.2f}%")
+        logger.info("--- Importance des Features ---")
+        logger.info(f"  Importance relative du Texte    : {feature_importances.get('text_percent', 0):.2f}%")
+        logger.info(f"  Importance relative de la Position : {feature_importances.get('position_percent', 0):.2f}%")
 
 def main():
     """Point d'entrée principal du script d'entraînement."""
@@ -542,7 +575,7 @@ def main():
         }
         
         # Charger et vectoriser les données en parallèle
-        print("\n📚 Chargement et vectorisation des données d'entraînement...")
+        logger.info("Chargement et vectorisation des données d'entraînement...")
         X, y, class_names = load_training_data(args.data_dir, feature_engineer_params, num_workers=args.workers)
         
         # Vérifier si le jeu de test sera assez grand pour la stratification
@@ -560,15 +593,15 @@ def main():
             )
         
         # Split train/test
-        print(f"\n✂️  Division train/test (test_size={args.test_size})...")
+        logger.info(f"Division train/test (test_size={args.test_size})...")
         X_train, X_test, y_train, y_test = train_test_split(
             X, y,
             test_size=args.test_size,
             random_state=args.random_state,
             stratify=y  # Stratifier pour maintenir la distribution des classes
         )
-        print(f"   Train: {len(X_train)} échantillons")
-        print(f"   Test: {len(X_test)} échantillons")
+        logger.info(f"Train: {len(X_train)} échantillons")
+        logger.info(f"Test: {len(X_test)} échantillons")
         
         # Entraîner le modèle
         model = train_model(
@@ -578,11 +611,11 @@ def main():
         )
         
         # Évaluer le modèle
-        print("\n📊 Évaluation du modèle...")
+        logger.info("Évaluation du modèle...")
         metrics = evaluate_model(model, X_test, y_test, class_names, args.model_type)
         
         # Sauvegarder le modèle et le rapport
-        print("\n💾 Sauvegarde...")
+        logger.info("Sauvegarde...")
         save_model_and_report(
             model,
             class_names,
@@ -591,12 +624,11 @@ def main():
             args.report_path
         )
         
-        print("\n✅ Entraînement terminé avec succès !")
+        logger.info("Entraînement terminé avec succès !")
         return 0
     
     except Exception as e:
         logger.error(f"Erreur lors de l'entraînement: {e}", exc_info=True)
-        print(f"\n❌ Erreur: {e}")
         return 1
 
 

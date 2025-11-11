@@ -130,7 +130,7 @@ classification:
   # Path to the trained classification model (saved with joblib).
   # The model should be a scikit-learn compatible classifier (e.g., LGBMClassifier, LogisticRegression).
   # If the path is relative, it will be resolved from the project root.
-  model_path: "D:/datasets/doc_analysis/models/document_classifier.joblib"
+  model_path: "training_data/artifacts/document_classifier.joblib"
   # Semantic model for feature engineering (sentence-transformers).
   # This model is used to create semantic embeddings from OCR text.
   # Recommended models for French: "antoinelouis/french-me5-base" (fast, good quality)

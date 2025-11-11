@@ -9,6 +9,7 @@ Ce script :
 """
 
 import sys
+import os
 from pathlib import Path
 import argparse
 import logging
@@ -33,30 +34,55 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)  # Mais garder INFO pour ce script
 
+# Variable globale pour le worker (sera initialisée par init_worker)
+worker_feature_extractor = None
+
+
+def init_worker(config_path: str = None):
+    """
+    Fonction d'initialisation pour chaque worker du Pool.
+    Charge le FeatureExtractor (et donc les modèles OCR) une seule fois.
+    
+    Args:
+        config_path: Chemin optionnel vers le fichier de configuration (None pour utiliser la config par défaut)
+    """
+    global worker_feature_extractor
+    worker_logger = logging.getLogger(__name__)
+    worker_logger.debug(f"[Worker PID: {os.getpid()}] Initialisation du FeatureExtractor...")
+    if config_path is not None:
+        config = get_config(config_path)
+    else:
+        config = get_config()
+    worker_feature_extractor = FeatureExtractor(app_config=config)
+    worker_logger.debug(f"[Worker PID: {os.getpid()}] FeatureExtractor prêt.")
+
 
 def process_single_image(args):
     """
     Traite une seule image (fonction worker pour multiprocessing).
+    Utilise le FeatureExtractor global initialisé par init_worker.
     
     Args:
-        args: Tuple de (image_file, output_json, config_path, doc_type, index, total)
+        args: Tuple de (image_file, output_json, doc_type, index, total)
         
     Returns:
         Tuple de (success: bool, image_name: str, error_msg: str or None)
     """
-    image_file, output_json, config_path, doc_type, index, total = args
+    image_file, output_json, doc_type, index, total = args
     
     try:
+        # Utiliser l'instance globale du worker
+        global worker_feature_extractor
+        if worker_feature_extractor is None:
+            # Sécurité si l'initialisation a échoué
+            raise RuntimeError("FeatureExtractor non initialisé dans le worker.")
+        
         # Vérifier si le fichier a déjà été traité
         if output_json.exists():
             return (True, image_file.name, "skip")
         
-        # Créer l'extracteur dans chaque worker (chaque processus a sa propre instance)
-        config = get_config(config_path)
-        extractor = FeatureExtractor(app_config=config)
-        
-        # Extraire les features
-        result = extractor.process(str(image_file), str(output_json))
+        # Utiliser l'instance partagée
+        result = worker_feature_extractor.process(str(image_file), str(output_json))
         
         if result.status == 'success':
             return (True, image_file.name, None)
@@ -124,7 +150,7 @@ def prepare_training_data(
             "Structure attendue: input_dir/TypeDocument/*.png"
         )
     
-    print(f"\n[INFO] Decouverte de {len(type_dirs)} types de documents")
+    logger.info(f"Découverte de {len(type_dirs)} types de documents")
     
     total_processed = 0
     total_errors = 0
@@ -132,7 +158,7 @@ def prepare_training_data(
     
     for type_dir in sorted(type_dirs):
         doc_type = type_dir.name
-        print(f"\n[INFO] Traitement du type: {doc_type}")
+        logger.info(f"Traitement du type: {doc_type}")
         
         # Créer le sous-dossier de sortie pour ce type
         output_type_dir = output_path / doc_type
@@ -140,14 +166,15 @@ def prepare_training_data(
         
         # Trouver toutes les images PNG dans ce dossier
         image_files = list(type_dir.glob('*.png'))
-        print(f"   Trouvé {len(image_files)} images")
+        logger.info(f"  Trouvé {len(image_files)} images")
         
         if not image_files:
             continue
         
         # Préparer les arguments pour chaque image
+        # Le tuple ne contient plus config_path (il est passé via initargs)
         tasks = [
-            (image_file, output_type_dir / f"{image_file.stem}.json", config_path, doc_type, i, len(image_files))
+            (image_file, output_type_dir / f"{image_file.stem}.json", doc_type, i, len(image_files))
             for i, image_file in enumerate(image_files, 1)
         ]
         
@@ -155,9 +182,13 @@ def prepare_training_data(
         success_count = 0
         error_count = 0
         
-        # --- AMÉLIORATION : Utiliser imap_unordered avec tqdm ---
-        print(f"   Lancement du traitement parallèle...")
-        with Pool(processes=num_workers) as pool:
+        # Utiliser le Pool avec initializer pour partager le FeatureExtractor entre les workers
+        logger.info(f"Lancement du traitement parallèle pour {doc_type}...")
+        with Pool(
+            processes=num_workers,
+            initializer=init_worker,
+            initargs=(config_path,)
+        ) as pool:
             # tqdm va automatiquement créer et mettre à jour une barre de progression
             # imap_unordered retourne les résultats dès qu'ils sont prêts
             results = list(tqdm(pool.imap_unordered(process_single_image, tasks), total=len(tasks), desc=f"   {doc_type}"))
@@ -178,24 +209,24 @@ def prepare_training_data(
         # Nettoyage mémoire après chaque type
         gc.collect()
         
-        print(f"   Succès: {success_count}, Erreurs: {error_count}")
+        logger.info(f"  Succès: {success_count}, Erreurs: {error_count}")
         type_counts[doc_type] = success_count
         total_processed += success_count
         total_errors += error_count
     
     # Afficher le résumé
-    print(f"\n{'='*60}")
-    print("[SUCCESS] Preparation terminee !")
-    print(f"{'='*60}")
-    print(f"\nResume par type de document:")
+    logger.info("="*60)
+    logger.info("Préparation terminée !")
+    logger.info("="*60)
+    logger.info("Résumé par type de document:")
     for doc_type, count in sorted(type_counts.items()):
-        print(f"  {doc_type}: {count} fichiers JSON crees")
-    print(f"\nTotal: {total_processed} fichiers traites avec succes")
+        logger.info(f"  {doc_type}: {count} fichiers JSON créés")
+    logger.info(f"Total: {total_processed} fichiers traités avec succès")
     if total_errors > 0:
-        print(f"[WARNING] {total_errors} erreurs rencontrees")
-    print(f"\nLes donnees sont pretes dans: {output_dir}")
-    print(f"\nVous pouvez maintenant entrainer le modele avec:")
-    print(f"  poetry run python training/train_classifier.py --data-dir {output_dir}")
+        logger.warning(f"{total_errors} erreurs rencontrées")
+    logger.info(f"Les données sont prêtes dans: {output_dir}")
+    logger.info(f"Vous pouvez maintenant entraîner le modèle avec:")
+    logger.info(f"  poetry run python training/train_classifier.py --data-dir {output_dir}")
 
 
 def main():
@@ -240,7 +271,7 @@ def main():
     try:
         prepare_training_data(args.input_dir, args.output_dir, args.config, args.workers)
     except Exception as e:
-        logger.error(f"[ERROR] Erreur: {e}", exc_info=True)
+        logger.error(f"Erreur: {e}", exc_info=True)
         return 1
     
     return 0

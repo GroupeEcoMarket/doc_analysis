@@ -243,7 +243,8 @@ def create_multimodal_embedding(
     semantic_embedding = semantic_model.encode(
         ocr_line.text,
         convert_to_numpy=True,
-        normalize_embeddings=True  # Normaliser pour améliorer la qualité
+        normalize_embeddings=True, # Normaliser pour améliorer la qualité
+        show_progress_bar=False
     )
     
     # 2. Embedding positionnel (coordonnées normalisées)

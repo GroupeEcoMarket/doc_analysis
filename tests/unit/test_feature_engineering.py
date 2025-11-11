@@ -150,7 +150,8 @@ class TestCreateMultimodalEmbedding:
         mock_sentence_transformer.encode.assert_called_once_with(
             "Test text",
             convert_to_numpy=True,
-            normalize_embeddings=True
+            normalize_embeddings=True,
+            show_progress_bar=False
         )
 
 

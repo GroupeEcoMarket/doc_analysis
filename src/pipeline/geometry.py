@@ -464,6 +464,249 @@ class GeometryNormalizer:
             }
     
     
+    def intelligent_crop_batch(
+        self, 
+        images: List[np.ndarray], 
+        capture_types: Optional[List[Optional[str]]] = None
+    ) -> Tuple[List[np.ndarray], List[Dict[str, Any]]]:
+        """
+        Analyse un lot d'images, détecte les documents et les découpe en utilisant l'inférence par lots.
+        
+        Cette méthode est optimisée pour traiter plusieurs images en une seule passe du modèle,
+        ce qui est beaucoup plus rapide que de traiter les images une par une.
+        
+        Args:
+            images: Liste d'images sous forme de tableaux NumPy (format OpenCV BGR).
+            capture_types: Liste optionnelle des types de capture ('SCAN' ou 'PHOTO') pour chaque image.
+                          Si None, tous les types sont considérés comme None.
+        
+        Returns:
+            tuple: (images_cropped, metadata_list)
+                - images_cropped: Liste des images découpées (ou images originales si le crop n'a pas été appliqué)
+                - metadata_list: Liste de dictionnaires avec les informations sur le crop pour chaque image
+        """
+        if not images:
+            return [], []
+        
+        num_images = len(images)
+        if capture_types is None:
+            capture_types = [None] * num_images
+        elif len(capture_types) != num_images:
+            # Si la longueur ne correspond pas, utiliser None pour les images manquantes
+            capture_types = list(capture_types) + [None] * (num_images - len(capture_types))
+        
+        # Initialiser les métadonnées par défaut pour toutes les images
+        metadata_list = [
+            {
+                'crop_applied': False,
+                'area_ratio': 1.0,
+                'status': 'skipped'
+            }
+            for _ in range(num_images)
+        ]
+        
+        if not self.enable_crop:
+            for metadata in metadata_list:
+                metadata['reason'] = 'Crop désactivé dans la configuration'
+            return images.copy(), metadata_list
+        
+        # Filtrer les images qui doivent être traitées (pas de SCAN skip)
+        images_to_process = []
+        indices_to_process = []
+        capture_types_to_process = []
+        
+        for i, (image, capture_type) in enumerate(zip(images, capture_types)):
+            if capture_type == 'SCAN' and self.capture_classifier_skip_crop_if_scan:
+                metadata_list[i]['status'] = 'skipped_scan'
+                metadata_list[i]['reason'] = 'Image classée comme SCAN, crop ignoré'
+            else:
+                images_to_process.append(image)
+                indices_to_process.append(i)
+                capture_types_to_process.append(capture_type)
+        
+        if not images_to_process:
+            # Toutes les images ont été skippées
+            return images.copy(), metadata_list
+        
+        try:
+            model = self._get_detection_model()
+            if model is None:
+                return images.copy(), metadata_list
+            
+            # INFÉRENCE PAR LOTS : Passer toutes les images au modèle en une seule fois
+            # C'est ici que se trouve le gain de performance majeur
+            output = model(images_to_process)
+            
+            # Traiter les résultats pour chaque image
+            results_images = images.copy()
+            
+            # Extraire les détections pour chaque image
+            all_detections = []
+            if isinstance(output, dict):
+                all_detections = output.get('preds', output.get('detections', output.get('pages', [])))
+            elif isinstance(output, list):
+                all_detections = output
+            elif hasattr(output, 'preds'):
+                all_detections = output.preds
+            elif hasattr(output, 'pages'):
+                all_detections = output.pages
+            
+            # Si all_detections est une liste, elle devrait contenir une détection par image
+            if not isinstance(all_detections, list):
+                all_detections = [all_detections]
+            
+            # Traiter chaque image du batch
+            for batch_idx, original_idx in enumerate(indices_to_process):
+                image = images_to_process[batch_idx]
+                metadata = metadata_list[original_idx]
+                
+                # Récupérer la détection pour cette image
+                if batch_idx < len(all_detections):
+                    detections = all_detections[batch_idx]
+                else:
+                    metadata['status'] = 'no_detection'
+                    continue
+                
+                # Si detections est une liste, prendre le premier élément
+                if isinstance(detections, list):
+                    detection = detections[0] if len(detections) > 0 else None
+                else:
+                    detection = detections
+                
+                if detection is None:
+                    metadata['status'] = 'no_detection'
+                    continue
+                
+                # Extraire les coordonnées du polygone (même logique que la version single)
+                corners = None
+                
+                if hasattr(detection, 'geometry'):
+                    corners = np.array(detection.geometry, dtype=np.float32)
+                elif hasattr(detection, 'polygon'):
+                    corners = np.array(detection.polygon, dtype=np.float32)
+                elif isinstance(detection, dict):
+                    if 'geometry' in detection or 'polygon' in detection:
+                        corners = np.array(detection.get('geometry', detection.get('polygon', [])), dtype=np.float32)
+                    elif 'words' in detection:
+                        words = detection['words']
+                        if isinstance(words, np.ndarray) and words.size > 0:
+                            xmin = float(np.min(words[:, 0]))
+                            ymin = float(np.min(words[:, 1]))
+                            xmax = float(np.max(words[:, 2]))
+                            ymax = float(np.max(words[:, 3]))
+                            corners = np.array([
+                                [xmin, ymin],
+                                [xmax, ymin],
+                                [xmax, ymax],
+                                [ymin, ymax]
+                            ], dtype=np.float32)
+                elif hasattr(detection, 'bbox'):
+                    bbox = detection.bbox
+                    if isinstance(bbox, (list, np.ndarray)) and len(bbox) >= 4:
+                        x1, y1, x2, y2 = bbox[:4]
+                        corners = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.float32)
+                
+                if corners is None or len(corners) < 4:
+                    metadata['status'] = 'invalid_geometry'
+                    continue
+                
+                # Analyser le résultat de la détection
+                image_height, image_width = image.shape[:2]
+                image_area = image_height * image_width
+                
+                # Convertir les coordonnées
+                if corners.max() <= 1.0:
+                    abs_corners = corners * np.array([image_width, image_height], dtype=np.float32)
+                else:
+                    abs_corners = corners.astype(np.float32)
+                
+                # Calculer l'aire
+                contour = abs_corners.reshape(-1, 1, 2).astype(np.int32)
+                document_area = cv2.contourArea(contour)
+                
+                area_ratio = document_area / image_area
+                metadata['area_ratio'] = float(area_ratio)
+                
+                # Décider s'il faut découper
+                if area_ratio > self.crop_threshold:
+                    metadata['status'] = 'already_cropped'
+                    continue
+                
+                # Ordonner les points
+                try:
+                    target_points = fit_quad_to_pts(abs_corners)
+                except Exception:
+                    target_points = abs_corners.reshape(4, 2)
+                
+                # Calculer les marges
+                min_x = float(target_points[:, 0].min())
+                max_x = float(target_points[:, 0].max())
+                min_y = float(target_points[:, 1].min())
+                max_y = float(target_points[:, 1].max())
+                
+                margins = {
+                    'top': (min_y / image_height) * 100,
+                    'bottom': ((image_height - max_y) / image_height) * 100,
+                    'left': (min_x / image_width) * 100,
+                    'right': ((image_width - max_x) / image_width) * 100
+                }
+                
+                # Vérifier le risque d'overcrop
+                max_margin_threshold_percent = self.crop_max_margin_ratio * 100
+                if any(margin < max_margin_threshold_percent for margin in margins.values()):
+                    smallest_margin = min(margins.values())
+                    logger.warning(
+                        f"Crop rejeté pour l'image {original_idx}: marge minimale {smallest_margin:.2f}% < seuil {max_margin_threshold_percent:.2f}%"
+                    )
+                    metadata['status'] = 'rejected_overcrop'
+                    metadata['reason'] = f'Marge minimale {smallest_margin:.2f}% < seuil {max_margin_threshold_percent:.2f}%'
+                    metadata['margins'] = margins
+                    continue
+                
+                # Découper et redresser
+                metadata['crop_applied'] = True
+                metadata['status'] = 'cropped'
+                metadata['margins'] = margins
+                
+                # Calculer les dimensions de la sortie
+                width_top = np.linalg.norm(target_points[1] - target_points[0])
+                width_bottom = np.linalg.norm(target_points[2] - target_points[3])
+                height_left = np.linalg.norm(target_points[3] - target_points[0])
+                height_right = np.linalg.norm(target_points[2] - target_points[1])
+                
+                target_width = int(max(width_top, width_bottom))
+                target_height = int(max(height_left, height_right))
+                
+                dst_points = np.array([
+                    [0, 0],
+                    [target_width, 0],
+                    [target_width, target_height],
+                    [0, target_height]
+                ], dtype=np.float32)
+                
+                transform_matrix = cv2.getPerspectiveTransform(target_points, dst_points)
+                
+                metadata['transform_matrix'] = transform_matrix.tolist()
+                metadata['source_points'] = target_points.tolist()
+                metadata['destination_points'] = dst_points.tolist()
+                metadata['output_size'] = [target_width, target_height]
+                
+                # Appliquer la transformation
+                warped_image = cv2.warpPerspective(image, transform_matrix, (target_width, target_height))
+                results_images[original_idx] = warped_image
+            
+            return results_images, metadata_list
+            
+        except Exception as e:
+            logger.error(f"Erreur lors du crop batch: {e}", exc_info=True)
+            # En cas d'erreur, retourner les images originales
+            for metadata in metadata_list:
+                if metadata['status'] == 'skipped':
+                    continue
+                metadata['status'] = 'error'
+                metadata['error'] = str(e)
+            return images.copy(), metadata_list
+    
     def intelligent_crop(self, image: np.ndarray, capture_type: Optional[str] = None) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
         Analyse une image, détecte le document et le découpe UNIQUEMENT
@@ -1153,7 +1396,10 @@ class GeometryNormalizer:
     
     def process_batch(self, input_dir: str, output_dir: str) -> List[GeometryOutput]:
         """
-        Traite un lot de documents depuis le répertoire preprocessing avec parallélisation et batching
+        Traite un lot de documents depuis le répertoire preprocessing avec inférence par lots optimisée.
+        
+        Cette méthode regroupe les images par batch et utilise l'inférence par lots pour le crop intelligent,
+        ce qui est beaucoup plus rapide que de traiter les images une par une.
         
         Args:
             input_dir: Répertoire contenant les images prétraitées (sortie de preprocessing)
@@ -1163,7 +1409,6 @@ class GeometryNormalizer:
             list: Liste des résultats pour chaque document
         """
         import json
-        from concurrent.futures import ThreadPoolExecutor, as_completed
         
         ensure_dir(output_dir)
         
@@ -1171,9 +1416,8 @@ class GeometryNormalizer:
         image_extensions = ['.png', '.jpg', '.jpeg']
         files = get_files(input_dir, extensions=image_extensions)
         
-        # Traiter par batches avec parallélisation
+        # Taille du batch pour l'inférence par lots
         batch_size = self.perf_config.batch_size
-        max_workers = self.perf_config.max_workers
         results = []
         
         # Diviser les fichiers en batches
@@ -1181,54 +1425,157 @@ class GeometryNormalizer:
             batch_end = min(batch_start + batch_size, len(files))
             batch_files = files[batch_start:batch_end]
             
-            logger.info(f"Traitement du batch {batch_start // batch_size + 1} ({len(batch_files)} fichiers)")
+            logger.info(f"Traitement du batch {batch_start // batch_size + 1} ({len(batch_files)} fichiers) avec inférence par lots")
             
-            # Traiter le batch en parallèle
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {
-                    executor.submit(self._process_single_file, file_path, output_dir): file_path
-                    for file_path in batch_files
-                }
-                
-                for future in as_completed(futures):
-                    file_path = futures[future]
-                    try:
-                        result = future.result()
-                        if result:
-                            results.append(result)
-                    except Exception as e:
-                        logger.error(f"Erreur lors du traitement de {file_path}", exc_info=True)
-                        # Créer un GeometryOutput avec status='error'
-                        error_output = GeometryOutput(
-                            status='error',
-                            input_path=file_path,
-                            output_path='',
-                            output_transformed_path='',
-                            transform_file='',
-                            qa_file='',
+            # Charger toutes les images du batch en mémoire
+            batch_images = []
+            batch_metadata = []
+            batch_file_paths = []
+            
+            for file_path in batch_files:
+                try:
+                    # Charger l'image
+                    img = cv2.imread(file_path)
+                    if img is None:
+                        logger.warning(f"Impossible de charger l'image: {file_path}")
+                        continue
+                    
+                    # Charger les métadonnées de preprocessing
+                    metadata_path = Path(file_path).with_suffix('.json')
+                    capture_type = 'PHOTO'
+                    capture_info = None
+                    original_input_path = file_path
+                    
+                    if metadata_path.exists():
+                        try:
+                            with open(metadata_path, 'r') as f:
+                                metadata = json.load(f)
+                                capture_type = metadata.get('capture_type', 'PHOTO')
+                                capture_info = metadata.get('capture_info', {})
+                                original_input_path = metadata.get('input_path', file_path)
+                        except Exception as e:
+                            logger.warning(f"Impossible de charger les métadonnées de {metadata_path}", exc_info=True)
+                    
+                    batch_images.append(img)
+                    batch_metadata.append({
+                        'file_path': file_path,
+                        'capture_type': capture_type,
+                        'capture_info': capture_info,
+                        'original_input_path': original_input_path
+                    })
+                    batch_file_paths.append(file_path)
+                    
+                except Exception as e:
+                    logger.error(f"Erreur lors du chargement de {file_path}: {e}", exc_info=True)
+                    # Créer un résultat d'erreur
+                    error_output = GeometryOutput(
+                        status='error',
+                        input_path=file_path,
+                        output_path='',
+                        output_transformed_path='',
+                        transform_file='',
+                        qa_file='',
+                        crop_applied=False,
+                        crop_metadata=CropMetadata(
                             crop_applied=False,
-                            crop_metadata=CropMetadata(
-                                crop_applied=False,
-                                area_ratio=0.0,
-                                status='error'
-                            ),
+                            area_ratio=0.0,
+                            status='error'
+                        ),
+                        deskew_applied=False,
+                        deskew_angle=0.0,
+                        deskew_metadata=DeskewMetadata(
                             deskew_applied=False,
-                            deskew_angle=0.0,
-                            deskew_metadata=DeskewMetadata(
-                                deskew_applied=False,
-                                angle=0.0,
-                                confidence=0.0,
-                                status='error'
-                            ),
-                            orientation_detected=False,
-                            angle=0,
-                            rotation_applied=False,
-                            transforms={},
-                            qa_flags={},
-                            processing_time=0.0,
-                            error=str(e)
-                        )
-                        results.append(error_output)
+                            angle=0.0,
+                            confidence=0.0,
+                            status='error'
+                        ),
+                        orientation_detected=False,
+                        angle=0,
+                        rotation_applied=False,
+                        transforms={},
+                        qa_flags={},
+                        processing_time=0.0,
+                        error=str(e)
+                    )
+                    results.append(error_output)
+            
+            if not batch_images:
+                continue
+            
+            # OPTIMISATION MAJEURE : Inférence par lots pour le crop intelligent
+            # Toutes les images sont traitées en une seule passe du modèle
+            capture_types_list = [meta['capture_type'] for meta in batch_metadata]
+            cropped_images, crop_metadata_list = self.intelligent_crop_batch(
+                images=batch_images,
+                capture_types=capture_types_list
+            )
+            
+            # Traiter chaque image individuellement pour le reste du pipeline
+            # (deskew, orientation, rotation)
+            for i, (file_path, img, metadata_info, crop_meta) in enumerate(
+                zip(batch_file_paths, cropped_images, batch_metadata, crop_metadata_list)
+            ):
+                try:
+                    # Générer les chemins de sortie
+                    base_output = get_output_path(file_path, output_dir)
+                    path_obj = Path(base_output)
+                    
+                    output_transformed_path = str(path_obj.with_stem(f"{path_obj.stem}_transformed"))
+                    output_original_path = str(path_obj.with_stem(f"{path_obj.stem}_original"))
+                    
+                    # Stocker le chemin original pour l'utiliser dans process()
+                    self._current_output_original_path = output_original_path
+                    
+                    # Traiter l'image avec le reste du pipeline
+                    result = self.process(
+                        img=img,
+                        output_path=output_transformed_path,
+                        capture_type=metadata_info['capture_type'],
+                        original_input_path=metadata_info['original_input_path'],
+                        capture_info=metadata_info['capture_info']
+                    )
+                    
+                    # Mettre à jour les chemins et les métadonnées de crop
+                    result.output_original_path = output_original_path
+                    result.output_transformed_path = output_transformed_path
+                    result.crop_metadata = CropMetadata(**crop_meta)
+                    result.crop_applied = crop_meta.get('crop_applied', False)
+                    
+                    results.append(result)
+                    
+                except Exception as e:
+                    logger.error(f"Erreur lors du traitement de {file_path}", exc_info=True)
+                    # Créer un résultat d'erreur
+                    error_output = GeometryOutput(
+                        status='error',
+                        input_path=file_path,
+                        output_path='',
+                        output_transformed_path='',
+                        transform_file='',
+                        qa_file='',
+                        crop_applied=False,
+                        crop_metadata=CropMetadata(**crop_meta) if crop_meta else CropMetadata(
+                            crop_applied=False,
+                            area_ratio=0.0,
+                            status='error'
+                        ),
+                        deskew_applied=False,
+                        deskew_angle=0.0,
+                        deskew_metadata=DeskewMetadata(
+                            deskew_applied=False,
+                            angle=0.0,
+                            confidence=0.0,
+                            status='error'
+                        ),
+                        orientation_detected=False,
+                        angle=0,
+                        rotation_applied=False,
+                        transforms={},
+                        qa_flags={},
+                        processing_time=0.0,
+                        error=str(e)
+                    )
+                    results.append(error_output)
         
         return results
     

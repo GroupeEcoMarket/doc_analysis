@@ -367,12 +367,31 @@ def evaluate_model(
             }
 
     # Rapport de classification
+    # zero_division=0 pour éviter les warnings et retourner 0.0 pour les métriques indéfinies
     report = classification_report(
         y_test,
         y_pred,
         target_names=class_names,
-        output_dict=True
+        output_dict=True,
+        zero_division=0
     )
+    
+    # Vérification manuelle : détecter les classes avec support non nul mais F1-score à 0
+    # Cela indique un problème potentiel (ex: classe présente dans le test mais jamais prédite)
+    for class_name in class_names:
+        if class_name in report:
+            class_metrics = report[class_name]
+            support = class_metrics.get('support', 0)
+            f1_score = class_metrics.get('f1-score', 0.0)
+            
+            # Si la classe a des échantillons dans le test mais une F1-score de 0
+            if support > 0 and f1_score == 0.0:
+                logger.warning(
+                    f"⚠️  Classe '{class_name}' présente dans le jeu de test ({support} échantillons) "
+                    f"mais jamais prédite correctement (F1-score = 0.0). "
+                    f"Précision: {class_metrics['precision']:.2f}, Rappel: {class_metrics['recall']:.2f}. "
+                    f"Vérifiez la qualité du modèle, l'équilibrage des classes et les données d'entraînement."
+                )
     
     # Matrice de confusion
     cm = confusion_matrix(y_test, y_pred)

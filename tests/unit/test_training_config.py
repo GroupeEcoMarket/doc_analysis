@@ -97,12 +97,15 @@ def test_prepare_training_data_uses_config_defaults():
                 "training_processed_dir": custom_processed
             },
             "features": {
-                "ocr": {
+                "ocr_filtering": {
                     "enabled": True,
-                    "default_language": "fr",
-                    "use_gpu": False,
                     "min_confidence": 0.70
                 }
+            },
+            "ocr_service": {
+                "queue_name": "ocr-queue",
+                "timeout_ms": 30000,
+                "max_retries": 3
             }
         }
         

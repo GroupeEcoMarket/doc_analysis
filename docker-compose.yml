@@ -1,0 +1,55 @@
+# docker-compose.yml
+
+services:
+  # 1. Le broker de messages Redis
+  # Version pinée pour garantir la reproductibilité des builds
+  redis:
+    image: redis:7.2-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # 2. Le microservice OCR
+  ocr-worker:
+    build:
+      context: ./services/ocr_service
+      dockerfile: Dockerfile
+    volumes:
+      # Mount code source for development
+      - ./services/ocr_service:/app
+      # Critical volume for shared storage
+      # This volume allows the OCR worker (in Docker) to access files
+      # saved by the API (on host). Without this volume, the identifier system
+      # won't work because the worker won't be able to read the files.
+      # Architecture:
+      # - API saves to ./data/temp_storage/image-xyz.png (on host)
+      # - Worker reads from /app/data/temp_storage/image-xyz.png (in Docker)
+      # - The volume creates the physical link between these two paths
+      - ./data/temp_storage:/app/data/temp_storage
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_HOST=redis
+      - OCR_WORKER_PROCESSES=1
+      - OCR_WORKER_THREADS=1
+      - OCR_STORAGE_DIR=/app/data/temp_storage
+    command: ["./run_worker.sh"]
+    restart: always
+    healthcheck:
+      test: ["CMD", "python", "healthcheck.py"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  redis_data:

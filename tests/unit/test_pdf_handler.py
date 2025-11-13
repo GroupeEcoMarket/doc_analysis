@@ -8,7 +8,7 @@ import os
 import numpy as np
 from pathlib import Path
 from unittest.mock import patch, MagicMock
-from src.utils.pdf_handler import is_pdf, pdf_to_images, save_image_from_pdf
+from src.utils.pdf_handler import is_pdf, pdf_to_images, pdf_buffer_to_images, save_image_from_pdf
 
 
 class TestIsPdf:
@@ -233,4 +233,136 @@ class TestSaveImageFromPdf:
             
             with pytest.raises(ValueError, match="Page 5 n'existe pas"):
                 save_image_from_pdf(pdf_path, output_path, page_num=5, dpi=300)
+
+
+class TestPdfBufferToImages:
+    """Tests for pdf_buffer_to_images()"""
+    
+    @patch('src.utils.pdf_handler.PYMUPDF_AVAILABLE', True)
+    @patch('src.utils.pdf_handler.fitz')
+    def test_pdf_buffer_to_images_with_pymupdf(self, mock_fitz):
+        """Test pdf_buffer_to_images() using PyMuPDF"""
+        # Mock PyMuPDF document
+        mock_doc = MagicMock()
+        mock_page = MagicMock()
+        mock_pix = MagicMock()
+        
+        # Setup mock pixmap
+        mock_pix.height = 100
+        mock_pix.width = 200
+        mock_pix.n = 3  # RGB
+        mock_pix.samples = np.ones((100, 200, 3), dtype=np.uint8).tobytes()
+        
+        mock_page.get_pixmap.return_value = mock_pix
+        mock_doc.__len__.return_value = 1
+        mock_doc.__iter__.return_value = iter([mock_page])
+        mock_fitz.open.return_value = mock_doc
+        mock_fitz.Matrix.return_value = MagicMock()
+        
+        # Create a dummy PDF buffer
+        pdf_buffer = b"%PDF-1.4\n1 0 obj\nendobj\nxref\ntrailer\n%%EOF"
+        
+        images = pdf_buffer_to_images(pdf_buffer, dpi=300)
+        
+        assert len(images) == 1
+        assert isinstance(images[0], np.ndarray)
+        assert images[0].shape == (100, 200, 3)  # BGR format
+        mock_doc.close.assert_called_once()
+    
+    @patch('src.utils.pdf_handler.PYMUPDF_AVAILABLE', False)
+    def test_pdf_buffer_to_images_no_library_available(self):
+        """Test pdf_buffer_to_images() when PyMuPDF is not available"""
+        pdf_buffer = b"%PDF-1.4\n1 0 obj\nendobj\nxref\ntrailer\n%%EOF"
+        
+        with pytest.raises(RuntimeError, match="PyMuPDF n'est pas installé"):
+            pdf_buffer_to_images(pdf_buffer, dpi=300)
+    
+    @patch('src.utils.pdf_handler.PYMUPDF_AVAILABLE', True)
+    @patch('src.utils.pdf_handler.fitz')
+    def test_pdf_buffer_to_images_empty_pdf(self, mock_fitz):
+        """Test pdf_buffer_to_images() with empty PDF"""
+        mock_doc = MagicMock()
+        mock_doc.__len__.return_value = 0
+        mock_fitz.open.return_value = mock_doc
+        
+        pdf_buffer = b"%PDF-1.4\n%%EOF"
+        
+        with pytest.raises(ValueError, match="Le PDF est vide"):
+            pdf_buffer_to_images(pdf_buffer, dpi=300)
+        
+        mock_doc.close.assert_called_once()
+    
+    @patch('src.utils.pdf_handler.PYMUPDF_AVAILABLE', True)
+    @patch('src.utils.pdf_handler.fitz')
+    def test_pdf_buffer_to_images_multiple_pages(self, mock_fitz):
+        """Test pdf_buffer_to_images() with multiple pages"""
+        mock_doc = MagicMock()
+        mock_page1 = MagicMock()
+        mock_page2 = MagicMock()
+        mock_pix1 = MagicMock()
+        mock_pix2 = MagicMock()
+        
+        # Setup mock pixmaps
+        for mock_pix, h, w in [(mock_pix1, 100, 200), (mock_pix2, 150, 250)]:
+            mock_pix.height = h
+            mock_pix.width = w
+            mock_pix.n = 3
+            mock_pix.samples = np.ones((h, w, 3), dtype=np.uint8).tobytes()
+        
+        mock_page1.get_pixmap.return_value = mock_pix1
+        mock_page2.get_pixmap.return_value = mock_pix2
+        mock_doc.__len__.return_value = 2
+        mock_doc.__iter__.return_value = iter([mock_page1, mock_page2])
+        mock_fitz.open.return_value = mock_doc
+        mock_fitz.Matrix.return_value = MagicMock()
+        
+        pdf_buffer = b"%PDF-1.4\n1 0 obj\nendobj\nxref\ntrailer\n%%EOF"
+        
+        images = pdf_buffer_to_images(pdf_buffer, dpi=300)
+        
+        assert len(images) == 2
+        assert images[0].shape == (100, 200, 3)
+        assert images[1].shape == (150, 250, 3)
+    
+    @patch('src.utils.pdf_handler.PYMUPDF_AVAILABLE', True)
+    @patch('src.utils.pdf_handler.fitz')
+    def test_pdf_buffer_to_images_with_min_dpi(self, mock_fitz):
+        """Test pdf_buffer_to_images() respects min_dpi parameter"""
+        mock_doc = MagicMock()
+        mock_page = MagicMock()
+        mock_pix = MagicMock()
+        
+        mock_pix.height = 100
+        mock_pix.width = 200
+        mock_pix.n = 3
+        mock_pix.samples = np.ones((100, 200, 3), dtype=np.uint8).tobytes()
+        
+        mock_page.get_pixmap.return_value = mock_pix
+        mock_doc.__len__.return_value = 1
+        mock_doc.__iter__.return_value = iter([mock_page])
+        mock_fitz.open.return_value = mock_doc
+        mock_matrix = MagicMock()
+        mock_fitz.Matrix.return_value = mock_matrix
+        
+        pdf_buffer = b"%PDF-1.4\n1 0 obj\nendobj\nxref\ntrailer\n%%EOF"
+        
+        # Test avec min_dpi plus élevé que dpi
+        pdf_buffer_to_images(pdf_buffer, dpi=200, min_dpi=300)
+        
+        # Vérifier que Matrix a été appelé avec le bon DPI (max(200, 300) = 300)
+        mock_fitz.Matrix.assert_called()
+        # Le premier argument devrait être 300/72 (min_dpi est utilisé)
+        call_args = mock_fitz.Matrix.call_args[0]
+        assert call_args[0] == pytest.approx(300 / 72)
+    
+    @patch('src.utils.pdf_handler.PYMUPDF_AVAILABLE', True)
+    @patch('src.utils.pdf_handler.fitz')
+    def test_pdf_buffer_to_images_error_handling(self, mock_fitz):
+        """Test pdf_buffer_to_images() error handling"""
+        mock_fitz.open.side_effect = Exception("PyMuPDF error")
+        
+        pdf_buffer = b"%PDF-1.4\n1 0 obj\nendobj\nxref\ntrailer\n%%EOF"
+        
+        with pytest.raises(RuntimeError, match="Impossible de convertir le PDF"):
+            pdf_buffer_to_images(pdf_buffer, dpi=300)
 

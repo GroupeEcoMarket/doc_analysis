@@ -87,6 +87,72 @@ def pdf_to_images(pdf_path: str, dpi: int = 300, min_dpi: int = 300) -> List[np.
     )
 
 
+def pdf_buffer_to_images(pdf_buffer: bytes, dpi: int = 300, min_dpi: int = 300) -> List[np.ndarray]:
+    """
+    Convertit un PDF depuis un buffer mémoire en liste d'images numpy.
+    
+    Args:
+        pdf_buffer: Contenu du PDF en bytes
+        dpi: Résolution DPI pour la conversion (défaut: 300)
+        min_dpi: DPI minimum garanti (défaut: 300). Le DPI effectif sera max(dpi, min_dpi)
+        
+    Returns:
+        List[np.ndarray]: Liste d'images numpy (une par page)
+        
+    Raises:
+        RuntimeError: Si PyMuPDF n'est pas installé ou si la conversion échoue
+        ValueError: Si le PDF est vide
+    """
+    if not PYMUPDF_AVAILABLE:
+        raise RuntimeError(
+            "PyMuPDF n'est pas installé. Installez-le avec: pip install PyMuPDF"
+        )
+    
+    try:
+        # Vérifier que pdf_buffer est bien des bytes
+        if not isinstance(pdf_buffer, bytes):
+            raise TypeError(f"pdf_buffer doit être de type bytes, mais a reçu {type(pdf_buffer)}: {type(pdf_buffer).__name__}")
+        
+        # Ouvrir le PDF depuis le buffer mémoire
+        doc = fitz.open(stream=pdf_buffer, filetype="pdf")
+        if len(doc) == 0:
+            doc.close()
+            raise ValueError("Le PDF est vide.")
+        
+        # S'assurer que le DPI est au moins min_dpi
+        actual_dpi = max(dpi, min_dpi)
+        mat = fitz.Matrix(actual_dpi / 72, actual_dpi / 72)
+        
+        images = []
+        # Boucler sur toutes les pages
+        for page in doc:
+            pix = page.get_pixmap(matrix=mat)
+            
+            # Convertir en numpy array
+            img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+                pix.height, pix.width, pix.n
+            )
+            
+            # Convertir le format de couleur selon le nombre de canaux
+            if pix.n == 4:  # RGBA
+                img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2BGR)
+            elif pix.n == 3:  # RGB
+                img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+            elif pix.n == 1:  # Grayscale
+                img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2BGR)
+            
+            images.append(img_array)
+        
+        doc.close()
+        return images
+        
+    except ValueError:
+        # Re-raise ValueError tel quel
+        raise
+    except Exception as e:
+        raise RuntimeError(f"Impossible de convertir le PDF en image: {str(e)}")
+
+
 def is_pdf(file_path: str) -> bool:
     """
     Vérifie si un fichier est un PDF

@@ -1,0 +1,64 @@
+# ===================================================================
+# Configuration autonome pour le service OCR isolé
+# ===================================================================
+# 
+# Ce fichier est TOTALEMENT AUTONOME et ne dépend pas du config.yaml
+# principal du monorepo. Le service OCR peut être déployé indépendamment
+# avec uniquement ce fichier de configuration.
+#
+# Tous les paramètres nécessaires pour PaddleOCR sont définis ici.
+
+# ==========================================
+# OCR CONFIGURATION
+# ==========================================
+
+ocr:
+  # Langue par défaut pour PaddleOCR
+  # Valeurs communes: 'fr' (français), 'en' (anglais), 'fr+en' (multilingue)
+  # Note: PaddleOCR utilise 'fr' (pas 'fra' comme Tesseract)
+  default_language: 'fr'
+  
+  # Activer l'accélération GPU (nécessite un environnement CUDA compatible)
+  # true: Utilise le GPU si disponible (plus rapide mais nécessite CUDA)
+  # false: Utilise le CPU (plus compatible, fonctionne partout)
+  use_gpu: false
+  
+  # Activer les optimisations MKLDNN/OneDNN pour l'accélération CPU
+  # ATTENTION: Peut causer des crashs sur certains CPU, notamment Windows
+  # Recommandé: false pour une meilleure compatibilité
+  # true: Active les optimisations (peut être plus rapide mais moins stable)
+  # false: Désactive les optimisations (plus stable, recommandé)
+  enable_mkldnn: false
+  
+  # Options d'exécution supplémentaires pour PaddleOCR
+  # Permet de passer des paramètres avancés directement à PaddleOCR
+  # Exemple: {cpu_threads: 4} pour limiter le nombre de threads CPU
+  # Exemple: {enable_mkldnn: true} pour activer MKLDNN (si enable_mkldnn ci-dessus est false)
+  # Laisser vide {} pour utiliser les valeurs par défaut de PaddleOCR
+  runtime_options: {}
+  
+  # Dimension maximale (largeur ou hauteur) pour les images avant traitement OCR
+  # Les images plus grandes seront automatiquement redimensionnées pour éviter les crashs
+  # PaddleOCR a une limite par défaut de 4000 pixels, donc 3500 est une marge de sécurité
+  # Valeurs recommandées:
+  #   - 3500: Bon équilibre entre qualité et stabilité (recommandé)
+  #   - 4000: Maximum théorique (risque de crash sur certaines images)
+  #   - 2500: Plus sûr mais peut perdre des détails sur les grandes images
+  max_image_dimension: 3500
+
+# ==========================================
+# DRAMATIQ CONFIGURATION
+# ==========================================
+
+dramatiq:
+  # Nombre de tentatives par défaut pour les tâches OCR
+  default_max_retries: 3
+  
+  # Limite de temps par défaut pour les tâches OCR (en millisecondes)
+  # 300000 = 5 minutes
+  default_time_limit: 300000
+  
+  # Durée de vie des messages dans la Dead Letter Queue (en millisecondes)
+  # 604800000 = 7 jours
+  dead_message_ttl: 604800000
+

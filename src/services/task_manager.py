@@ -55,7 +55,7 @@ class TaskManager:
     
     This is a simple in-memory implementation. For production, consider using:
     - Redis for distributed task storage
-    - Celery or Dramatiq for task queue management
+    - Dramatiq for task queue management
     - Database for persistent task storage
     """
     

@@ -1,0 +1,244 @@
+# docker-compose.prod.yml
+# Configuration de production
+# 
+# Usage:
+#   docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Cette configuration surcharge docker-compose.yml avec des paramètres optimisés pour la production :
+# - Retire les volumes de développement (pas de montage du code source)
+# - Ajoute les services API et workers de l'application principale
+# - Optimise les ressources et les configurations pour la production
+# - Configure la rotation des logs pour éviter de saturer le disque
+#
+# Note: Docker Compose fusionne automatiquement les fichiers spécifiés avec -f
+# Les services définis ici surchargent ceux de docker-compose.yml
+#
+# Logging:
+# Les services utilisent le driver json-file avec rotation (10 Mo max, 5 fichiers).
+# Pour une vraie production, envisagez un driver de logging centralisé :
+# - fluentd : Collecte et agrégation de logs
+# - splunk : Plateforme d'analyse de logs
+# - gelf : Format Graylog Extended Log Format
+# Exemple avec fluentd:
+#   logging:
+#     driver: "fluentd"
+#     options:
+#       fluentd-address: "localhost:24224"
+#       tag: "doc-analysis.{{.Name}}"
+
+services:
+  # 1. Le broker de messages Redis (hérite de docker-compose.yml)
+  redis:
+    # Configuration de production pour Redis
+    # Pas de changement majeur, mais on peut optimiser la mémoire
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru
+    # Pas de volume de développement nécessaire en production
+    # Les données Redis persistent via le volume redis_data
+
+  # 2. Le microservice OCR (hérite de docker-compose.yml)
+  ocr-worker:
+    # En production, on ne monte plus le code source
+    # L'image Docker contient déjà tout le code
+    volumes:
+      # Seul le volume de stockage partagé est nécessaire
+      - ./data/temp_storage:/app/data/temp_storage:rw
+    # Configuration optimisée pour la production
+    environment:
+      - REDIS_HOST=redis
+      - OCR_STORAGE_DIR=/app/data/temp_storage
+      # Configuration des workers OCR pour la production
+      - OCR_WORKER_PROCESSES=4
+      - OCR_WORKER_THREADS=2
+    # Commande de production : lance Dramatiq directement sans --watch
+    # Le --watch est excellent pour le dev mais à proscrire en production
+    # car il surveille les changements de fichiers et redémarre le worker
+    # En production, le code est dans l'image Docker et ne change pas
+    # La commande utilise les variables d'environnement OCR_WORKER_PROCESSES et OCR_WORKER_THREADS
+    # ⚠️ Pas de valeurs par défaut : si les variables ne sont pas définies, le service échouera au démarrage
+    # Cela garantit une configuration explicite et évite les surprises en production
+    command: ["sh", "-c", "python -m dramatiq actors --processes ${OCR_WORKER_PROCESSES} --threads ${OCR_WORKER_THREADS} --queues ocr-queue"]
+    # Pas de volume de code source en production
+    # Le code est dans l'image Docker
+    # Configuration de logging avec rotation pour éviter de saturer le disque
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"  # Taille max de 10 Mo par fichier de log
+        max-file: "5"    # Garde 5 fichiers de log (rotation automatique)
+
+  # 3. API FastAPI (nouveau service pour la production)
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: doc-analysis-api:latest
+    ports:
+      - "8000:8000"  # API + métriques Prometheus sur /metrics
+    volumes:
+      # Volume pour le stockage partagé (même que ocr-worker)
+      - ./data/temp_storage:/app/data/temp_storage:rw
+      # Volume pour les données persistantes
+      - ./data/input:/app/data/input:ro
+      - ./data/output:/app/data/output:rw
+      - ./data/processed:/app/data/processed:rw
+      # Volume pour les modèles ML
+      - ./models:/app/models:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      ocr-worker:
+        condition: service_healthy
+    environment:
+      # Configuration API
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - API_DEBUG=False
+      # Configuration Redis (pour Dramatiq)
+      - REDIS_HOST=redis
+      # Chemins de données
+      - INPUT_DIR=/app/data/input
+      - OUTPUT_DIR=/app/data/output
+      - PROCESSED_DIR=/app/data/processed
+      - MODEL_PATH=/app/models
+      # Chemins configurables via variables d'environnement
+      - TEMP_STORAGE_DIR=/app/data/temp_storage
+      - CLASSIFICATION_MODEL_PATH=/app/models/document_classifier.joblib
+      - CLASSIFICATION_EMBEDDING_MODEL=antoinelouis/french-me5-base
+      - TRAINING_RAW_DIR=/app/training_data/raw
+      - TRAINING_PROCESSED_DIR=/app/training_data/processed
+      - TRAINING_ARTIFACTS_DIR=/app/training_data/artifacts
+      # Logging
+      - LOG_LEVEL=INFO
+      - PYTHONUNBUFFERED=1
+    command: ["uvicorn", "src.api.app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
+    restart: always
+    # Configuration de logging avec rotation pour éviter de saturer le disque
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"  # Taille max de 10 Mo par fichier de log
+        max-file: "5"    # Garde 5 fichiers de log (rotation automatique)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # 4. Workers Dramatiq pour l'application principale (nouveau service)
+  workers:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: doc-analysis-api:latest  # Même image que l'API
+    volumes:
+      # Volume pour le stockage partagé (même que ocr-worker et api)
+      - ./data/temp_storage:/app/data/temp_storage:rw
+      # Volume pour les données persistantes
+      - ./data/input:/app/data/input:ro
+      - ./data/output:/app/data/output:rw
+      - ./data/processed:/app/data/processed:rw
+      # Volume pour les modèles ML
+      - ./models:/app/models:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      ocr-worker:
+        condition: service_healthy
+    environment:
+      # Configuration Redis (pour Dramatiq)
+      - REDIS_HOST=redis
+      # Configuration des workers (application principale)
+      # Note: DRAMATIQ_THREADS=2 en production (vs 1 en dev) pour optimiser les performances
+      - DRAMATIQ_PROCESSES=4
+      - DRAMATIQ_THREADS=2
+      # Chemins de données
+      - INPUT_DIR=/app/data/input
+      - OUTPUT_DIR=/app/data/output
+      - PROCESSED_DIR=/app/data/processed
+      - MODEL_PATH=/app/models
+      # Chemins configurables via variables d'environnement
+      - TEMP_STORAGE_DIR=/app/data/temp_storage
+      - CLASSIFICATION_MODEL_PATH=/app/models/document_classifier.joblib
+      - CLASSIFICATION_EMBEDDING_MODEL=antoinelouis/french-me5-base
+      - TRAINING_RAW_DIR=/app/training_data/raw
+      - TRAINING_PROCESSED_DIR=/app/training_data/processed
+      - TRAINING_ARTIFACTS_DIR=/app/training_data/artifacts
+      # Logging
+      - LOG_LEVEL=INFO
+      - PYTHONUNBUFFERED=1
+    # La commande utilise les variables d'environnement DRAMATIQ_PROCESSES et DRAMATIQ_THREADS
+    # ⚠️ Pas de valeurs par défaut : si les variables ne sont pas définies, le service échouera au démarrage
+    # Cela garantit une configuration explicite et évite les surprises en production
+    command: ["sh", "-c", "dramatiq src.workers --processes ${DRAMATIQ_PROCESSES} --threads ${DRAMATIQ_THREADS}"]
+    restart: always
+    # Configuration de logging avec rotation pour éviter de saturer le disque
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"  # Taille max de 10 Mo par fichier de log
+        max-file: "5"    # Garde 5 fichiers de log (rotation automatique)
+    ports:
+      # Exposer le port des métriques Prometheus pour les workers
+      - "9090:9090"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9090/health').read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # 5. Prometheus - Collecte et stockage des métriques
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: doc-analysis-prometheus
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./monitoring/prometheus:/etc/prometheus
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+    restart: always
+    depends_on:
+      - api
+      - workers
+    networks:
+      - default
+
+  # 6. Grafana - Visualisation des métriques
+  grafana:
+    image: grafana/grafana:latest
+    container_name: doc-analysis-grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=http://localhost:3000
+      - GF_INSTALL_PLUGINS=
+    restart: always
+    depends_on:
+      - prometheus
+    networks:
+      - default
+
+# Volumes pour Prometheus et Grafana
+volumes:
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+# Les autres volumes sont hérités de docker-compose.yml
+

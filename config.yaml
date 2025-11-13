@@ -3,6 +3,21 @@
 # This file serves as a dashboard for any engineer joining the project
 
 # ==========================================
+# METADATA
+# ==========================================
+
+meta:
+  version: 1.0
+  description: "Document analysis pipeline parameters — functional & reproducible"
+
+# ==========================================
+# ENVIRONMENT OVERRIDES
+# ==========================================
+
+environment_overrides:
+  allowed: true  # If an environment variable exists, it has priority over config.yaml
+
+# ==========================================
 # GEOMETRY NORMALIZATION
 # ==========================================
 
@@ -127,15 +142,6 @@ classification:
   # Document Type Classification
   # Classifies documents into types (e.g., "Attestation_CEE", "Facture", etc.)
   enabled: true  # Enable/disable document type classification
-  # Path to the trained classification model (saved with joblib).
-  # The model should be a scikit-learn compatible classifier (e.g., LGBMClassifier, LogisticRegression).
-  # If the path is relative, it will be resolved from the project root.
-  model_path: "training_data/artifacts/document_classifier.joblib"
-  # Semantic model for feature engineering (sentence-transformers).
-  # This model is used to create semantic embeddings from OCR text.
-  # Recommended models for French: "antoinelouis/french-me5-base" (fast, good quality)
-  # or "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2" (multilingual, smaller)
-  embedding_model: "antoinelouis/french-me5-base"
   # Minimum confidence threshold for OCR lines to be included in embeddings.
   # Higher values (e.g., 0.85) are stricter and only use high-confidence text.
   # Lower values (e.g., 0.60) are more lenient but may include incorrectly recognized text.
@@ -145,35 +151,32 @@ classification:
   # Higher values (e.g., 0.80) are stricter and only accept high-confidence classifications.
   # Lower values (e.g., 0.50) are more lenient but may accept incorrect classifications.
   classification_confidence_threshold: 0.60
+  device: "cpu"  # or "cuda" if you have a GPU and want to use it
+  # Maximum number of pages to process in a single batch.
+  # Documents with more pages will be automatically split into multiple batches.
+  # Higher values (e.g., 20) process more pages at once but may consume more memory.
+  # Lower values (e.g., 5) use less memory but may create more overhead.
+  max_pages_per_batch: 10
 
 # ==========================================
 # FEATURE EXTRACTION
 # ==========================================
 
 features:
-  # OCR (Optical Character Recognition)
-  # Extracts text content from images
-  ocr:
-    enabled: true  # Enable/disable OCR text extraction
-    # Default language for PaddleOCR engine.
-    # Common values: 'fr' (French), 'en' (English), 'fr+en' (multi-language).
-    # Using the correct language significantly improves recognition accuracy.
-    # Note: PaddleOCR uses 'fr' (not 'fra' like Tesseract).
-    default_language: 'fr'
-    # Enable GPU acceleration (requires compatible CUDA environment).
-    use_gpu: false
-    # Enable MKLDNN/OneDNN optimizations (may cause issues on some CPU builds, especially Windows).
-    enable_mkldnn: false
-    # Extra runtime options forwarded to PaddleOCR (e.g., cpu_threads).
-    # Leave empty by default for maximum compatibility.
-    runtime_options: {}
-    # Maximum dimension (width or height) for images before OCR processing.
-    # Images larger than this will be automatically resized to prevent PaddleOCR crashes.
-    # PaddleOCR has a default max_side_len of 4000, so we use 3500 as safety margin.
-    # Higher values (e.g., 4000) process larger images but risk crashes or slow processing.
-    # Lower values (e.g., 2500) are safer and faster but may lose some detail.
-    max_image_dimension: 3500
-    # Minimum confidence threshold for a recognized word/line to be accepted.
+  # OCR Results Filtering (Post-processing)
+  # This section configures the filtering of OCR results AFTER they are returned by the OCR microservice.
+  # It does NOT configure the OCR process itself, which is entirely managed by the isolated OCR service.
+  # 
+  # The OCR process configuration (PaddleOCR settings: language, GPU, MKLDNN, etc.) is located in:
+  # services/ocr_service/config.yaml
+  #
+  # This section only controls:
+  # - Whether to enable/disable OCR text extraction in the main pipeline
+  # - The minimum confidence threshold for filtering OCR results (post-processing filter)
+  ocr_filtering:
+    enabled: true  # Enable/disable OCR text extraction in the main pipeline
+    # Minimum confidence threshold for filtering OCR results AFTER they are returned by the OCR service.
+    # This is a POST-PROCESSING filter applied to the OCR results, not a parameter of the OCR engine itself.
     # Higher values (e.g., 0.85) are stricter and only accept high-confidence text, reducing false positives.
     # Lower values (e.g., 0.60) are more lenient but may include incorrectly recognized text.
     min_confidence: 0.70
@@ -197,15 +200,6 @@ features:
 # ==========================================
 
 performance:
-  # Number of pages to process per batch.
-  # Higher values (e.g., 50) improve throughput but increase memory usage.
-  # Lower values (e.g., 10) use less memory but may be slower for large documents.
-  batch_size: 30
-  # Number of worker threads for parallel processing.
-  # Higher values (e.g., 8) improve speed on multi-core systems but increase CPU usage.
-  # Lower values (e.g., 2) use less CPU but may be slower.
-  # Should not exceed the number of CPU cores.
-  max_workers: 4
   # Minimum number of items (pages/images) required to trigger parallel processing.
   # Below this threshold, sequential processing is used to avoid the overhead of process creation.
   # Higher values (e.g., 5) reduce parallelization overhead but may miss opportunities for speedup.
@@ -245,16 +239,54 @@ output:
   jpeg_quality: 95
 
 # ==========================================
-# PATHS & STORAGE
+# OCR SERVICE CONFIGURATION
 # ==========================================
 
-paths:
-  # Données brutes (images/pdf) pour l'entraînement (default: training_data/raw)
-  training_raw_dir: training_data/raw
+ocr_service:
+  # Configuration pour la communication avec le microservice OCR isolé
+  # Le microservice OCR est déployé séparément et écoute la queue ocr-queue
+  
+  # Nom de la queue Dramatiq pour le microservice OCR
+  # Cette queue doit correspondre à celle configurée dans services/ocr_service/actors.py
+  queue_name: 'ocr-queue'
+  
+  # Timeout en millisecondes pour attendre le résultat d'une tâche OCR
+  # Si le microservice ne répond pas dans ce délai, une FeatureExtractionError sera levée
+  # Défaut: 30000 (30 secondes)
+  timeout_ms: 30000
+  
+  # Nombre de tentatives en cas d'échec
+  # Défaut: 3
+  max_retries: 3
 
-  # Données préparées (JSON OCR) pour l'entraînement (default: training_data/processed)
-  training_processed_dir: training_data/processed
+# ==========================================
+# DRAMATIQ CONFIGURATION
+# ==========================================
 
-  # Répertoire de sortie pour les modèles et rapports (default: training_data/artifacts)
-  training_artifacts_dir: training_data/artifacts
+dramatiq:
+  # Dead Letter Queue (DLQ) Configuration
+  # Dramatiq gère automatiquement la DLQ avec le nom 'dramatiq:dead_letter'
+  # Les tâches qui échouent après max_retries sont automatiquement envoyées vers cette queue
+  # Permet de récupérer et analyser les tâches échouées pour debugging ou rejeu
+  
+  # Durée de vie des messages dans la DLQ (en millisecondes)
+  # Défaut: 604800000 (7 jours). Les messages plus anciens sont automatiquement supprimés
+  dead_message_ttl: 604800000  # 7 jours en millisecondes
+  
+  # Configuration des retries par défaut pour les actors
+  # Note: Les actors peuvent surcharger ces valeurs avec leurs propres paramètres
+  default_max_retries: 3  # Nombre de tentatives avant envoi en DLQ
+  default_time_limit: 300000  # Timeout par défaut en millisecondes (5 minutes)
+  
+  # Configuration du verrou d'initialisation des workers (FileLock)
+  # Timeout en secondes pour l'acquisition du verrou inter-processus lors de l'initialisation
+  # des modèles. Si un worker ne peut pas acquérir le verrou dans ce délai, une exception
+  # sera levée. Défaut: 60 secondes.
+  worker_init_lock_timeout: 60  # en secondes
+  
+  # Timeout global pour la finalisation des documents (en secondes)
+  # Si ce timeout est atteint, la tâche de finalisation agrège les résultats disponibles
+  # et retourne un résultat partiel plutôt que d'échouer complètement.
+  # Défaut: 300 secondes (5 minutes)
+  finalization_timeout_seconds: 300  # 5 minutes
 

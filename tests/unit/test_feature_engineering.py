@@ -20,7 +20,18 @@ from src.pipeline.models import OCRLine, FeaturesOutput
 def mock_sentence_transformer():
     """Mock du modèle sentence-transformers"""
     mock_model = Mock()
-    mock_model.encode.return_value = np.random.rand(384).astype(np.float32)  # Dimension typique
+    
+    def encode_side_effect(texts, **kwargs):
+        """Simule l'encodage : retourne un array 2D pour batch, 1D pour texte unique"""
+        if isinstance(texts, list):
+            # Batch encoding: retourne (n_texts, embedding_dim)
+            n_texts = len(texts)
+            return np.random.rand(n_texts, 384).astype(np.float32)
+        else:
+            # Single text encoding: retourne (embedding_dim,)
+            return np.random.rand(384).astype(np.float32)
+    
+    mock_model.encode.side_effect = encode_side_effect
     mock_model.get_sentence_embedding_dimension.return_value = 384
     return mock_model
 
@@ -260,8 +271,12 @@ class TestFeatureEngineer:
         expected_dim = semantic_dim + 4
         assert embedding.shape == (expected_dim,)
         
-        # Vérifier que le modèle a été appelé (pour les lignes filtrées)
-        assert mock_sentence_transformer.encode.call_count == 3  # 3 lignes avec conf >= 0.70
+        # Vérifier que le modèle a été appelé une seule fois avec toutes les lignes en batch
+        assert mock_sentence_transformer.encode.call_count == 1
+        # Vérifier que l'appel contient une liste de 3 textes (3 lignes avec conf >= 0.70)
+        call_args = mock_sentence_transformer.encode.call_args
+        assert isinstance(call_args[0][0], list)
+        assert len(call_args[0][0]) == 3  # 3 lignes avec conf >= 0.70
     
     @patch('src.classification.feature_engineering.SentenceTransformer')
     def test_extract_document_embedding_from_dict(

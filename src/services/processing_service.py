@@ -36,7 +36,7 @@ class ProcessingService:
     
     This service encapsulates all business logic for processing documents,
     making it independent of the API framework (FastAPI). It can be reused
-    by CLI tools, background workers (Celery, Dramatiq), or other interfaces.
+    by CLI tools, background workers (Dramatiq), or other interfaces.
     """
     
     # Allowed file extensions

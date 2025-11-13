@@ -1,0 +1,33 @@
+# pyproject.toml pour le service OCR isolé
+# Ce fichier permet d'isoler les dépendances du service OCR du reste du monorepo
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry]
+name = "ocr-service"
+version = "0.1.0"
+description = "Service OCR isolé utilisant PaddleOCR"
+authors = ["Axel Air <axel@ar-partners.fr>"]
+readme = "README.md"
+packages = [{include = "actors.py"}]
+
+# --- Dépendances minimales pour le service OCR ---
+[tool.poetry.dependencies]
+python = "^3.11"
+numpy = "~1.26.4"
+paddlepaddle = ">=3.0.0b2,<4.0.0"
+paddleocr = ">=3.3.1,<4.0.0"
+opencv-python = ">=4.8.0,<5.0.0"
+pyyaml = ">=6.0.0,<7.0.0"
+filelock = ">=3.13.0,<4.0.0"
+
+# Dramatiq pour les workers asynchrones
+dramatiq = {extras = ["redis"], version = "^1.18.0"}
+
+# --- Dépendances de Développement (optionnel) ---
+[tool.poetry.group.dev.dependencies]
+pytest = ">=9.0.0,<10.0.0"
+black = ">=25.11.0,<26.0.0"
+

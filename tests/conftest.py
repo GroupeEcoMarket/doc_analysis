@@ -171,13 +171,15 @@ def mock_app_config(mock_geometry_config, mock_qa_config, mock_performance_confi
     config._config_data = {
         'colometry': {},
         'features': {
-            'ocr': {
+            'ocr_filtering': {
                 'enabled': False,
-                'default_language': 'fr',
-                'use_gpu': False,
                 'min_confidence': 0.70,
-                'max_image_dimension': 3500,
             }
+        },
+        'ocr_service': {
+            'queue_name': 'ocr-queue',
+            'timeout_ms': 30000,
+            'max_retries': 3
         },
         'classification': {
             'enabled': True,

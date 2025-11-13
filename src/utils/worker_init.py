@@ -2,11 +2,13 @@
 Utilitaires partagés pour l'initialisation des workers dans le multiprocessing.
 
 Ce module centralise la logique commune d'initialisation des workers pour éviter
-la duplication de code entre différents modules (API routes, geometry pipeline, etc.).
+la duplication de code entre différents modules (API routes, geometry pipeline, workers Dramatiq, etc.).
+
+C'est la source unique de vérité pour la création des dépendances lourdes (modèles ML).
 """
 
 import os
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 from dataclasses import asdict
 
 from src.utils.logger import get_logger
@@ -106,6 +108,7 @@ def create_api_dependencies_from_config(config: Optional[Config] = None) -> Dict
     Crée les dépendances API (FeatureExtractor, DocumentClassifier) depuis une configuration.
     
     Cette fonction centralise la création des dépendances API pour le multiprocessing.
+    Utilise les fonctions de dépendance de l'API pour maintenir la cohérence.
     
     Args:
         config: Configuration (optionnel, sera chargée si None)
@@ -131,4 +134,68 @@ def create_api_dependencies_from_config(config: Optional[Config] = None) -> Dict
         logger.debug("Classification désactivée, document_classifier non initialisé")
     
     return dependencies
+
+
+def create_classification_dependencies(config: Optional[Config] = None) -> Tuple["FeatureExtractor", Optional["DocumentClassifier"]]:
+    """
+    Crée les dépendances de classification (FeatureExtractor, DocumentClassifier) depuis une configuration.
+    
+    Cette fonction centralise la création des dépendances de classification pour les workers Dramatiq
+    et autres contextes de multiprocessing. C'est la source unique de vérité pour l'initialisation
+    de ces modèles lourds.
+    
+    IMPORTANT: Cette fonction initialise les modèles lourds (PyTorch, etc.) dans chaque worker.
+    
+    Args:
+        config: Configuration (optionnel, sera chargée si None)
+        
+    Returns:
+        tuple: (feature_extractor, document_classifier)
+            - feature_extractor: FeatureExtractor (toujours initialisé)
+            - document_classifier: DocumentClassifier (peut être None si désactivé ou en cas d'erreur)
+    """
+    if config is None:
+        config = get_config()
+    
+    # Importer ici pour éviter les imports circulaires
+    from src.pipeline.features import FeatureExtractor
+    from src.classification.classifier_service import DocumentClassifier
+    
+    # Créer FeatureExtractor (toujours nécessaire)
+    feature_extractor = FeatureExtractor(app_config=config)
+    
+    # Créer DocumentClassifier (peut être None si désactivé)
+    document_classifier = None
+    try:
+        document_classifier = DocumentClassifier(app_config=config)
+    except ValueError as e:
+        # Classification désactivée ou modèle non trouvé
+        logger.debug(f"DocumentClassifier non initialisé: {e}")
+        document_classifier = None
+    except Exception as e:
+        # Autre erreur lors de l'initialisation
+        logger.error(f"Erreur lors de l'initialisation du DocumentClassifier: {e}", exc_info=True)
+        document_classifier = None
+    
+    return feature_extractor, document_classifier
+
+
+def init_classification_worker(config: Optional[Config] = None) -> Tuple["FeatureExtractor", Optional["DocumentClassifier"]]:
+    """
+    Initialise les dépendances de classification pour un worker.
+    
+    Cette fonction est la fonction d'initialisation standardisée pour les workers de classification.
+    Elle garantit que :
+    1. L'environnement PaddleOCR est configuré (première chose)
+    2. Les modèles sont initialisés une seule fois par processus
+    3. Les erreurs sont gérées proprement
+    
+    Args:
+        config: Configuration (optionnel, sera chargée si None)
+        
+    Returns:
+        tuple: (feature_extractor, document_classifier)
+    """
+    # Créer les dépendances
+    return create_classification_dependencies(config)
 

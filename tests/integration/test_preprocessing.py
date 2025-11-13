@@ -8,6 +8,7 @@ import os
 import numpy as np
 import cv2
 from pathlib import Path
+from unittest.mock import patch
 from src.pipeline.preprocessing import PreprocessingNormalizer
 from src.utils.exceptions import PreprocessingError, ImageProcessingError
 from src.utils.capture_classifier import CaptureClassifier
@@ -32,7 +33,8 @@ def create_preprocessing_normalizer(app_config):
 class TestPreprocessingNormalizer:
     """Integration tests for PreprocessingNormalizer"""
     
-    def test_process_image_success(self, app_config):
+    @patch('src.pipeline.preprocessing.time.time', side_effect=[100.0, 100.5])
+    def test_process_image_success(self, mock_time, app_config):
         """Test processing a single image successfully"""
         # Utilise la VRAIE configuration pour les tests d'intégration
         normalizer = create_preprocessing_normalizer(app_config)
@@ -54,7 +56,8 @@ class TestPreprocessingNormalizer:
             assert result.processed_path == output_path
             assert result.capture_type is not None
             assert result.capture_info is not None
-            assert result.processing_time > 0
+            # Vérifier que processing_time est égal à la valeur contrôlée (0.5 secondes)
+            assert result.processing_time == pytest.approx(0.5, rel=1e-6)
             
             # Check that output file was created
             assert os.path.exists(output_path)

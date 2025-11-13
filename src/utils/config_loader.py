@@ -8,6 +8,15 @@ import yaml
 from pathlib import Path
 from typing import Dict, Any, Optional
 from dataclasses import dataclass
+from dotenv import load_dotenv
+
+# Charger les variables d'environnement depuis .env au démarrage du module
+# Important: Charger AVANT toute utilisation de os.getenv()
+env_path = Path(__file__).parent.parent.parent / ".env"
+if env_path.exists():
+    load_dotenv(env_path)
+else:
+    load_dotenv()  # Essaie de charger depuis le répertoire courant
 
 
 @dataclass
@@ -174,9 +183,23 @@ class Config:
         """Charge la configuration de performance"""
         perf = self._config_data.get('performance', {})
         
+        # Ces paramètres peuvent être définis via variables d'environnement OU config.yaml
+        # Priorité: variable d'environnement > config.yaml > valeur par défaut
+        batch_size_env = os.getenv('PERFORMANCE_BATCH_SIZE')
+        if batch_size_env:
+            batch_size = int(batch_size_env)
+        else:
+            batch_size = perf.get('batch_size', 10)
+        
+        max_workers_env = os.getenv('PERFORMANCE_MAX_WORKERS')
+        if max_workers_env:
+            max_workers = int(max_workers_env)
+        else:
+            max_workers = perf.get('max_workers', 4)
+        
         return PerformanceConfig(
-            batch_size=perf.get('batch_size', 10),
-            max_workers=perf.get('max_workers', 4),
+            batch_size=batch_size,
+            max_workers=max_workers,
             parallelization_threshold=perf.get('parallelization_threshold', 2),
             lazy_load_models=perf.get('lazy_load_models', True)
         )
@@ -198,13 +221,59 @@ class Config:
         """
         Récupère une valeur de configuration par clé (support des clés imbriquées).
         
+        Priorité de chargement :
+        1. Variable d'environnement (si la clé correspond à un chemin ou identifiant)
+        2. Valeur dans config.yaml
+        3. Valeur par défaut fournie
+        
         Args:
-            key: Clé de configuration (ex: 'features.ocr.enabled')
+            key: Clé de configuration (ex: 'features.ocr_filtering.enabled')
             default: Valeur par défaut si la clé n'existe pas
             
         Returns:
             Valeur de configuration ou valeur par défaut
         """
+        # Mapping des clés de config vers les variables d'environnement
+        # Toutes les variables d'environnement définies dans env.example doivent être mappées ici
+        env_var_mapping = {
+            # Classification
+            'classification.model_path': 'CLASSIFICATION_MODEL_PATH',
+            'classification.embedding_model': 'CLASSIFICATION_EMBEDDING_MODEL',
+            
+            # Chemins de données
+            'paths.input_dir': 'INPUT_DIR',
+            'paths.output_dir': 'OUTPUT_DIR',
+            'paths.processed_dir': 'PROCESSED_DIR',
+            'paths.model_path': 'MODEL_PATH',
+            'paths.temp_storage_dir': 'TEMP_STORAGE_DIR',
+            'paths.training_raw_dir': 'TRAINING_RAW_DIR',
+            'paths.training_processed_dir': 'TRAINING_PROCESSED_DIR',
+            'paths.training_artifacts_dir': 'TRAINING_ARTIFACTS_DIR',
+            
+            # Redis
+            'redis.host': 'REDIS_HOST',
+            
+            # Storage
+            'storage.backend': 'STORAGE_BACKEND',
+            
+            # Performance
+            'performance.batch_size': 'PERFORMANCE_BATCH_SIZE',
+            'performance.max_workers': 'PERFORMANCE_MAX_WORKERS',
+            
+            # Metrics (Prometheus)
+            'metrics.workers_port': 'METRICS_WORKERS_PORT',
+            'metrics.workers_host': 'METRICS_WORKERS_HOST',
+            'metrics.queue_monitor_interval': 'METRICS_QUEUE_MONITOR_INTERVAL',
+        }
+        
+        # Vérifier si cette clé a une variable d'environnement correspondante
+        env_var = env_var_mapping.get(key)
+        if env_var:
+            env_value = os.getenv(env_var)
+            if env_value is not None:
+                return env_value
+        
+        # Sinon, charger depuis le YAML comme avant
         keys = key.split('.')
         value = self._config_data
         

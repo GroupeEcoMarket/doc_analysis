@@ -28,7 +28,8 @@ class FeatureEngineer:
         semantic_model_name: str = 'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2',
         min_confidence: float = 0.70,
         image_width: Optional[int] = None,
-        image_height: Optional[int] = None
+        image_height: Optional[int] = None,
+        device: Optional[str] = None
     ):
         """
         Initialise le FeatureEngineer.
@@ -41,9 +42,13 @@ class FeatureEngineer:
                         Si None, sera calculé depuis les bounding boxes.
             image_height: Hauteur de l'image (pour normaliser les coordonnées).
                          Si None, sera calculé depuis les bounding boxes.
+            device: Device PyTorch à utiliser ('cpu', 'cuda', etc.).
+                   Si None, utilise 'cpu' par défaut pour éviter les problèmes dans multiprocessing.
         """
         self.semantic_model_name = semantic_model_name
-        self.semantic_model = SentenceTransformer(semantic_model_name)
+        # Utiliser le device fourni ou 'cpu' par défaut pour éviter les problèmes dans multiprocessing
+        device = device or 'cpu'
+        self.semantic_model = SentenceTransformer(semantic_model_name, device=device)
         self.min_confidence = min_confidence
         self.image_width = image_width
         self.image_height = image_height
@@ -85,18 +90,34 @@ class FeatureEngineer:
             filtered_lines, image_width, image_height
         )
         
+        # Encoder toutes les lignes de texte en un seul appel batch
+        texts = [line.text for line in filtered_lines]
+        semantic_embeddings = self.semantic_model.encode(
+            texts,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+            show_progress_bar=False
+        )
+        
         # Créer les embeddings multi-modaux pour chaque ligne
         line_embeddings = []
         line_confidences = []
         
-        for line in filtered_lines:
-            embedding = create_multimodal_embedding(
-                line,
-                self.semantic_model,
+        for i, line in enumerate(filtered_lines):
+            # Extraire l'embedding positionnel
+            positional_embedding = extract_positional_features(
+                line.bounding_box,
                 width,
                 height
             )
-            line_embeddings.append(embedding)
+            
+            # Concaténer l'embedding sémantique (déjà encodé) avec l'embedding positionnel
+            multimodal_embedding = np.concatenate([
+                semantic_embeddings[i],
+                positional_embedding
+            ])
+            
+            line_embeddings.append(multimodal_embedding)
             line_confidences.append(line.confidence)
         
         # Agréger les embeddings en un seul vecteur

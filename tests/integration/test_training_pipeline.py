@@ -36,12 +36,15 @@ def get_base_config_content():
     """Retourne le contenu de base pour config.yaml (sans section paths)."""
     return {
         "features": {
-            "ocr": {
+            "ocr_filtering": {
                 "enabled": True,
-                "default_language": "fr",
-                "use_gpu": False,
                 "min_confidence": 0.70
             }
+        },
+        "ocr_service": {
+            "queue_name": "ocr-queue",
+            "timeout_ms": 30000,
+            "max_retries": 3
         },
         "classification": {
             "enabled": True,

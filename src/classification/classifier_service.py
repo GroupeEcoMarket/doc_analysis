@@ -45,22 +45,49 @@ class DocumentClassifier:
                           Si None, sera chargé depuis config.yaml.
         """
         # Charger la configuration
-        config_dict = app_config.get('classification', {})
+        config_dict = app_config.get('classification', default={})
         
         # Utiliser les paramètres fournis ou ceux de la config
-        self.model_path = model_path or config_dict.get('model_path', 'models/document_classifier.joblib')
+        # Le chemin du modèle est dans env.paths.classification_model
+        self.model_path = model_path or app_config.get('env', 'paths', 'classification_model', default='training_data/artifacts/document_classifier.joblib')
+        
         # Support pour 'embedding_model' (nouveau) et 'semantic_model_name' (ancien, pour compatibilité)
-        self.semantic_model_name = semantic_model_name or config_dict.get(
-            'embedding_model',
-            config_dict.get('semantic_model_name', 'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')
-        )
+        # PRIORITÉ: 1) paramètre explicite, 2) variable d'environnement CLASSIFICATION_EMBEDDING_MODEL, 3) config.yaml, 4) valeur par défaut
+        if semantic_model_name:
+            # Si fourni explicitement, l'utiliser
+            embedding_model = semantic_model_name
+            logger.info(f"Modèle d'embedding fourni explicitement: {embedding_model}")
+        else:
+            # Essayer d'abord la variable d'environnement via app_config.get()
+            # Le modèle d'embedding est dans env.models.embedding
+            embedding_model = app_config.get('env', 'models', 'embedding', default=None)
+            if embedding_model:
+                logger.info(f"Modèle d'embedding chargé depuis la variable d'environnement CLASSIFICATION_EMBEDDING_MODEL: {embedding_model}")
+            else:
+                # Fallback vers l'ancien nom dans config.yaml pour compatibilité
+                embedding_model = config_dict.get('semantic_model_name')
+                if embedding_model:
+                    logger.info(f"Modèle d'embedding chargé depuis config.yaml (semantic_model_name): {embedding_model}")
+                else:
+                    # Dernier fallback: valeur par défaut
+                    embedding_model = 'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2'
+                    logger.warning(
+                        f"Aucun modèle d'embedding configuré. Utilisation de la valeur par défaut: {embedding_model}. "
+                        f"Pour utiliser 'antoinelouis/french-me5-base', définissez CLASSIFICATION_EMBEDDING_MODEL dans votre .env ou docker-compose.yml"
+                    )
+        
+        self.semantic_model_name = embedding_model
         self.min_confidence = min_confidence or config_dict.get('min_confidence', 0.70)
         self.classification_confidence_threshold = config_dict.get('classification_confidence_threshold', 0.60)
         
-        # Initialiser le feature engineer
+        # Lire le device depuis la config (par défaut 'cpu' pour éviter les problèmes dans multiprocessing)
+        self.device = config_dict.get('device', 'cpu')
+        
+        # Initialiser le feature engineer avec le device depuis la config
         self.feature_engineer = FeatureEngineer(
             semantic_model_name=self.semantic_model_name,
-            min_confidence=self.min_confidence
+            min_confidence=self.min_confidence,
+            device=self.device
         )
         
         # Charger le modèle ML

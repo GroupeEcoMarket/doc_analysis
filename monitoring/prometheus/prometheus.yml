@@ -1,0 +1,40 @@
+# Configuration Prometheus pour le système d'analyse de documents
+
+global:
+  scrape_interval: 15s  # Scraper les métriques toutes les 15 secondes
+  evaluation_interval: 15s  # Évaluer les règles toutes les 15 secondes
+  external_labels:
+    cluster: 'doc-analysis'
+    environment: 'production'
+
+# Configuration des alertes (optionnel)
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets: []
+
+# Fichiers de règles (optionnel)
+# rule_files:
+#   - "alert_rules.yml"
+
+# Configuration des cibles à scraper
+scrape_configs:
+  # Métriques de l'API FastAPI
+  - job_name: 'api'
+    static_configs:
+      - targets: ['api:8000']
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+
+  # Métriques des workers Dramatiq
+  - job_name: 'workers'
+    static_configs:
+      - targets: ['workers:9090']
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+
+  # Métriques Prometheus lui-même
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+

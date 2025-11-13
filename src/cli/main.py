@@ -2,9 +2,6 @@
 Command-line interface for document analysis pipeline
 """
 
-from src.utils.bootstrap import configure_paddle_environment
-configure_paddle_environment()  # Doit être appelé avant toutes les autres importations
-
 import click
 import os
 from pathlib import Path

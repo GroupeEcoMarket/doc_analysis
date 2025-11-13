@@ -1,0 +1,79 @@
+# .dockerignore
+# Fichiers et répertoires à exclure de l'image Docker
+
+# Tests
+tests/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+.pytest_cache/
+htmlcov/
+.coverage
+*.cover
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# Développement
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Docker
+docker-compose.yml
+docker-compose.*.yml
+Dockerfile*
+.dockerignore
+
+# Données temporaires et caches
+data/temp_storage/*
+data/input/*
+data/output/*
+data/processed/*
+!data/temp_storage/.gitkeep
+!data/input/.gitkeep
+!data/output/.gitkeep
+!data/processed/.gitkeep
+
+# Modèles (seront montés via volume en production)
+models/*
+
+# Training
+training/
+training_data/
+
+# Exemples
+examples/
+
+# Logs
+logs/
+*.log
+
+# Autres
+.python-version
+poetry.lock
+pyproject.toml.lock
+*.egg-info/
+dist/
+build/
+*.whl
+
+# Coverage et rapports
+qa_report.html
+qa_report.py
+digest.txt
+meta.json
+

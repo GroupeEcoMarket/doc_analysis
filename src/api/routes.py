@@ -1,8 +1,14 @@
 """
 API routes for document analysis
 """
+import dramatiq
+from dramatiq.results.errors import ResultMissing
+from dramatiq.results import Results
+from src.workers import classify_document_task, warmup_worker_task
+from src.utils.ocr_client import warmup_ocr_worker
+from dramatiq.results import ResultTimeout
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks, Depends, Response
+from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks, Depends
 from fastapi.responses import JSONResponse
 from typing import Optional, Dict, Any, List, Tuple, Annotated, Union
 from pydantic import BaseModel, Field
@@ -11,7 +17,6 @@ from pathlib import Path
 import numpy as np
 import cv2
 import time
-from concurrent.futures import ProcessPoolExecutor
 
 from src.services.processing_service import ProcessingService
 from src.services.task_manager import get_task_manager, TaskStatus
@@ -25,6 +30,7 @@ from src.api.dependencies import (
 from src.pipeline.preprocessing import PreprocessingNormalizer
 from src.pipeline.geometry import GeometryNormalizer
 from src.pipeline.features import FeatureExtractor
+from src.pipeline.models import PageClassificationResult
 from src.classification.classifier_service import DocumentClassifier
 from src.utils.logger import get_logger, get_request_id
 from src.utils.exceptions import (
@@ -32,9 +38,10 @@ from src.utils.exceptions import (
     PreprocessingError, 
     ModelLoadingError, 
     ImageProcessingError,
-    PipelineError
+    PipelineError,
+    FeatureExtractionError
 )
-from src.utils.pdf_handler import is_pdf
+from src.utils.pdf_handler import is_pdf, pdf_buffer_to_images
 from src.utils.config_loader import Config
 
 logger = get_logger(__name__)
@@ -43,65 +50,6 @@ router = APIRouter()
 
 # Initialize task manager (singleton)
 task_manager = get_task_manager()
-
-
-# ==========================================
-# Multiprocessing Worker Functions
-# ==========================================
-
-# Dictionnaire global pour stocker les dépendances initialisées dans chaque worker
-worker_dependencies = {}
-
-
-def init_api_worker():
-    """
-    Initialise les dépendances (modèles lourds) une seule fois par processus worker.
-    
-    Utilise les utilitaires partagés de src.utils.worker_init pour éviter la duplication.
-    """
-    global worker_dependencies
-    
-    if 'feature_extractor' not in worker_dependencies:
-        from src.utils.worker_init import (
-            create_api_dependencies_from_config,
-            log_worker_initialization
-        )
-        
-        # Charger la configuration
-        config = get_app_config()
-        
-        # Créer les dépendances en utilisant la fonction partagée
-        dependencies = create_api_dependencies_from_config(config)
-        worker_dependencies.update(dependencies)
-        
-        log_worker_initialization('api')
-    else:
-        logger.debug(f"Modèles déjà initialisés pour le worker PID: {os.getpid()}")
-
-
-def process_page_worker(page_tuple: Tuple[int, np.ndarray]) -> Tuple[int, Dict[str, Any]]:
-    """
-    Fonction exécutée par chaque worker pour traiter une seule page.
-    Utilise les modèles initialisés dans worker_dependencies.
-    """
-    page_index, image_np = page_tuple
-    
-    feature_extractor = worker_dependencies.get('feature_extractor')
-    document_classifier = worker_dependencies.get('document_classifier')
-    
-    if not feature_extractor or not document_classifier:
-        # Si les modèles ne sont pas chargés, on retourne une erreur
-        return page_index, {
-            'document_type': None,
-            'confidence': 0.0,
-            'error': "Classifier non disponible dans le worker."
-        }
-        
-    ocr_lines = feature_extractor.extract_ocr(image_np)
-    ocr_data = {'ocr_lines': ocr_lines}
-    classification_result = document_classifier.predict(ocr_data)
-    
-    return page_index, classification_result
 
 
 # ==========================================
@@ -205,20 +153,16 @@ class ClassificationResponse(BaseModel):
     processing_time: float = Field(..., description="Temps de traitement en secondes")
 
 
-class PageClassificationResult(BaseModel):
-    """Result for a single page classification"""
-    page_number: int = Field(..., description="Numéro de page (1-indexed)")
-    document_type: Optional[str] = Field(None, description="Type de document détecté")
-    confidence: float = Field(..., description="Confiance de la classification (0.0-1.0)")
-
-
 class MultiPageClassificationResponse(BaseModel):
     """Response model for multi-page document classification endpoint"""
-    status: str = Field(..., description="Statut du traitement")
+    status: str = Field(..., description="Statut du traitement: 'success', 'partial_success', ou 'error'")
     filename: Optional[str] = Field(None, description="Nom du fichier d'entrée")
     total_pages: int = Field(..., description="Nombre total de pages traitées")
+    successful_pages: int = Field(..., description="Nombre de pages traitées avec succès")
+    failed_pages: int = Field(..., description="Nombre de pages ayant échoué")
     results_by_page: List[PageClassificationResult] = Field(..., description="Résultats de classification par page")
     processing_time: float = Field(..., description="Temps de traitement en secondes")
+    message: Optional[str] = Field(None, description="Message décrivant le statut du traitement")
 
 
 class TaskResponse(BaseModel):
@@ -235,9 +179,22 @@ class TaskStatusResponse(BaseModel):
     created_at: Optional[str] = Field(None, description="Task creation timestamp")
     started_at: Optional[str] = Field(None, description="Task start timestamp")
     completed_at: Optional[str] = Field(None, description="Task completion timestamp")
-    result: Optional[Dict[str, Any]] = Field(None, description="Task result (if completed)")
-    error: Optional[str] = Field(None, description="Error message (if failed)")
-    filename: Optional[str] = Field(None, description="Original filename")
+
+
+class WarmupResponse(BaseModel):
+    """Response model for worker warm-up endpoint"""
+    status: str = Field(..., description="Warm-up status")
+    message: str = Field(..., description="Human-readable message")
+    task_count: Optional[int] = Field(None, description="Number of warm-up tasks sent")
+
+
+class OCRHealthResponse(BaseModel):
+    """Response model for OCR service health check"""
+    status: str = Field(..., description="Health check status: 'healthy' or 'unhealthy'")
+    engine_initialized: bool = Field(..., description="Whether the OCR engine is initialized")
+    worker_pid: Optional[int] = Field(None, description="Process ID of the worker that responded")
+    message: str = Field(..., description="Message describing the health check result")
+    response_time_ms: Optional[float] = Field(None, description="Response time in milliseconds")
 
 
 # Helper function for background task execution
@@ -394,7 +351,7 @@ async def analyze_document(
         )
         
         # 5. Schedule background task for processing
-        # Note: For production, consider using Celery or Dramatiq for better task management
+        # Note: For production, consider using Dramatiq for better task management
         # Récupérer le request_id pour le propager à la tâche asynchrone
         current_request_id = get_request_id()
         background_tasks.add_task(
@@ -647,9 +604,9 @@ async def pipeline_geometry(
         )
 
 
-def pdf_buffer_to_images(pdf_buffer: bytes, dpi: int = 300) -> List[np.ndarray]:
+def pdf_buffer_to_images_with_error_handling(pdf_buffer: bytes, dpi: int = 300) -> List[np.ndarray]:
     """
-    Convertit un PDF depuis un buffer mémoire en liste d'images numpy.
+    Wrapper autour de pdf_buffer_to_images pour convertir les exceptions en HTTPException.
     
     Args:
         pdf_buffer: Contenu du PDF en bytes
@@ -662,20 +619,6 @@ def pdf_buffer_to_images(pdf_buffer: bytes, dpi: int = 300) -> List[np.ndarray]:
         HTTPException: Si la conversion échoue
     """
     try:
-        import fitz  # PyMuPDF
-    except ImportError:
-        raise HTTPException(
-            status_code=500,
-            detail="PyMuPDF n'est pas installé. Installez-le avec: pip install PyMuPDF"
-        )
-    
-    try:
-        # Ouvrir le PDF depuis le buffer mémoire
-        doc = fitz.open(stream=pdf_buffer, filetype="pdf")
-        if len(doc) == 0:
-            doc.close()
-            raise HTTPException(status_code=400, detail="Le PDF est vide.")
-        
         # Utiliser min_dpi depuis la config (défaut: 300 si non disponible)
         from src.utils.config_loader import get_config
         try:
@@ -683,32 +626,12 @@ def pdf_buffer_to_images(pdf_buffer: bytes, dpi: int = 300) -> List[np.ndarray]:
             min_dpi = pdf_config.min_dpi
         except:
             min_dpi = 300  # Fallback si la config n'est pas disponible
-        actual_dpi = max(dpi, min_dpi)
-        mat = fitz.Matrix(actual_dpi / 72, actual_dpi / 72)
         
-        images = []
-        # Boucler sur toutes les pages
-        for page in doc:
-            pix = page.get_pixmap(matrix=mat)
-            
-            # Convertir en numpy array
-            img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
-                pix.height, pix.width, pix.n
-            )
-            
-            # Convertir le format de couleur selon le nombre de canaux
-            if pix.n == 4:  # RGBA
-                img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2BGR)
-            elif pix.n == 3:  # RGB
-                img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-            elif pix.n == 1:  # Grayscale
-                img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2BGR)
-            
-            images.append(img_array)
-        
-        doc.close()
-        return images
-        
+        return pdf_buffer_to_images(pdf_buffer, dpi=dpi, min_dpi=min_dpi)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         raise HTTPException(
             status_code=400,
@@ -753,7 +676,7 @@ async def pipeline_features(
         
         if is_pdf(file.filename or ""):
             # Utiliser PyMuPDF pour convertir le PDF en mémoire (première page seulement)
-            images_np = pdf_buffer_to_images(file_content, dpi=300)
+            images_np = pdf_buffer_to_images_with_error_handling(file_content, dpi=300)
             image_np = images_np[0] if images_np else None
             if image_np is None:
                 raise HTTPException(status_code=400, detail="Le PDF est vide.")
@@ -793,122 +716,378 @@ async def pipeline_features(
 
 @router.post(
     "/classify",
-    response_model=MultiPageClassificationResponse,
-    summary="Document Type Classification",
+    # La réponse est maintenant un TaskResponse, pas MultiPageClassificationResponse
+    response_model=TaskResponse,
+    status_code=202,  # 202 Accepted, car le traitement est déféré
+    summary="Submit a document for classification (Asynchronous)",
     description="""
-    Classifie le type de document depuis une image ou un PDF.
+    Chef d'Orchestre léger : Soumet un document pour classification. Répond immédiatement avec un task_id.
+    Utilisez GET /api/v1/classify/results/{task_id} pour obtenir le résultat.
     
     **Processus :**
-    1. Extrait les features OCR (via /pipeline/features)
-    2. Vectorise le document avec des embeddings multi-modaux
-    3. Classe le document avec le modèle ML entraîné
-    4. Retourne le type de document et la confiance pour chaque page
+    1. Reçoit le fichier
+    2. Le découpe en images (s'il s'agit d'un PDF)
+    3. Sauvegarde chaque image via le StorageService
+    4. Pour chaque page, crée une tâche unique et indépendante process_page_task avec l'identifiant de l'image et l'ID du document global
+    5. Retourne immédiatement un task_id global
+    
+    Chaque tâche process_page_task est indépendante et effectue :
+    - Chargement de l'image depuis le stockage
+    - Extraction OCR via le microservice OCR
+    - Classification du document
     
     **Input:**
     - Accepts image files (PNG, JPG, JPEG, TIFF, BMP) or PDF files
     
     **Output:**
-    - **total_pages:** Nombre total de pages traitées
-    - **results_by_page:** Liste des résultats de classification pour chaque page
-    - Pour chaque page: **document_type** (ex: "Attestation_CEE", "Facture") et **confidence** (0.0-1.0)
-    - Si la confiance est en dessous du seuil configuré, document_type sera None
+    - Retourne immédiatement un task_id avec le statut "pending"
+    - Utilisez GET /api/v1/classify/results/{task_id} pour obtenir les résultats
     
     **Note:** La classification doit être activée dans config.yaml (classification.enabled: true)
     """
 )
-async def classify_document(
-    feature_extractor: Annotated[FeatureExtractor, Depends(get_feature_extractor)],
-    document_classifier: Annotated[DocumentClassifier, Depends(get_document_classifier)],
-    app_config: Annotated[Config, Depends(get_app_config)],
-    file: UploadFile = File(...)
-) -> MultiPageClassificationResponse:
+async def classify_document(file: UploadFile = File(...)) -> TaskResponse:
     """
-    Classe le type de document depuis une image ou un PDF (toutes les pages).
-    """
-    start_time = time.time()
+    Chef d'Orchestre léger : Reçoit le fichier, le découpe en images, sauvegarde chaque image,
+    crée une tâche process_page_task pour chaque page, et retourne immédiatement un task_id global.
     
+    L'endpoint ne fait plus l'OCR - chaque tâche process_page_task est indépendante et fait
+    son propre OCR + classification.
+    """
+    from src.utils.storage import get_storage
+    from src.workers import process_page_task, aggregate_classification_results
+    import uuid
+    
+    # Log au début du traitement
+    filename = file.filename or "unknown"
+    current_request_id = get_request_id()
+    logger.info(f"Début de la classification pour '{filename}'. request_id: {current_request_id}.")
+    
+    file_content = await file.read()
+    if not file_content:
+        raise HTTPException(status_code=400, detail="Le fichier est vide.")
+
+    # === ÉTAPE 1 : Découper le fichier en images (si PDF) ===
+    storage = get_storage()
+    
+    images_np: List[np.ndarray]
+    if is_pdf(filename):
+        try:
+            from src.utils.config_loader import get_config
+            pdf_config = get_config().pdf
+            min_dpi = pdf_config.min_dpi
+        except:
+            min_dpi = 300
+        try:
+            images_np = pdf_buffer_to_images(file_content, dpi=300, min_dpi=min_dpi)
+        except Exception as e:
+            error_msg = f"Échec de la conversion PDF en images: {str(e)}"
+            logger.error(error_msg)
+            raise HTTPException(status_code=500, detail=error_msg)
+    else:
+        img_array = np.frombuffer(file_content, np.uint8)
+        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        if img is None:
+            raise HTTPException(status_code=400, detail="Format d'image invalide ou corrompu")
+        images_np = [img]
+    
+    if not images_np:
+        raise HTTPException(status_code=400, detail="Aucune image n'a pu être extraite du fichier")
+    
+    num_pages = len(images_np)
+    document_id = f"doc_{uuid.uuid4().hex[:12]}"
+    
+    # Log après la préparation des pages
+    logger.info(f"Document découpé en {num_pages} page(s). document_id: {document_id}. request_id: {current_request_id}.")
+    
+    # === ÉTAPE 2 : Sauvegarder chaque image via StorageService ===
+    image_identifiers = []
+    for page_index, image_np in enumerate(images_np):
+        image_identifier = storage.save_image(image_np, page_index=page_index, task_id=document_id)
+        image_identifiers.append(image_identifier)
+    
+    # Stocker les identifiants d'images et le filename dans Redis pour le nettoyage ultérieur et la récupération
     try:
-        # 1. Lire le contenu du fichier
-        file_content = await file.read()
-        if not file_content:
-            raise HTTPException(status_code=400, detail="Le fichier est vide.")
+        import json
+        from src.workers import process_page_task
+        # Utiliser le client Redis du broker Dramatiq
+        redis_client = process_page_task.broker.client
+        image_identifiers_key = f"document:{document_id}:image_identifiers"
+        redis_client.setex(image_identifiers_key, 86400, json.dumps(image_identifiers))  # 24 heures
         
-        # 2. Convertir en images NumPy
-        images_np: List[np.ndarray]
-        
-        if is_pdf(file.filename or ""):
-            # Utiliser PyMuPDF pour convertir le PDF en mémoire (toutes les pages)
-            images_np = pdf_buffer_to_images(file_content, dpi=300)
+        # Stocker aussi le filename pour la récupération par le Janitor
+        filename_key = f"document:{document_id}:filename"
+        redis_client.setex(filename_key, 86400, filename)  # 24 heures
+    except Exception as e:
+        logger.warning(f"Impossible de stocker les métadonnées dans Redis: {e}")
+    
+    logger.info(
+        f"Document '{filename}' découpé en {num_pages} page(s) et sauvegardé",
+        extra={
+            "metrics": {
+                "filename": filename,
+                "num_pages": num_pages,
+                "document_id": document_id,
+                "stage": "document_split_and_saved"
+            }
+        }
+    )
+    
+    # === ÉTAPE 3 : Créer une tâche process_page_task pour chaque page ===
+    page_messages = []
+    
+    for page_index, image_identifier in enumerate(image_identifiers):
+        if current_request_id:
+            message = process_page_task.send(
+                image_identifier,
+                page_index,
+                document_id,
+                options={"message_metadata": {"request_id": current_request_id}}
+            )
         else:
-            # Pour une image simple, on la met dans une liste d'un seul élément
-            img = cv2.imdecode(np.frombuffer(file_content, np.uint8), cv2.IMREAD_COLOR)
-            if img is None:
-                raise HTTPException(status_code=400, detail="Format d'image invalide ou corrompu.")
-            images_np = [img]
-        
-        num_pages = len(images_np)
-        page_results_list = [None] * num_pages
-        
-        # --- LOGIQUE DE PARALLÉLISATION ---
-        # Seuil pragmatique : ne pas lancer de processus pour un petit nombre de pages
-        # Le coût de création des processus peut être supérieur au gain.
-        # Le seuil est configurable via performance.parallelization_threshold dans config.yaml
-        parallelization_threshold = app_config.performance.parallelization_threshold
-        
-        if num_pages >= parallelization_threshold:
-            logger.info(f"Traitement parallèle de {num_pages} pages...")
-            # Préparer les tâches avec leur index original
-            tasks = [(i, images_np[i]) for i in range(num_pages)]
-            
-            with ProcessPoolExecutor(max_workers=os.cpu_count(), initializer=init_api_worker) as executor:
-                # `map` exécute la fonction sur chaque élément de `tasks` et préserve l'ordre
-                results = executor.map(process_page_worker, tasks)
-                
-                for original_index, classification_result in results:
-                    page_results_list[original_index] = PageClassificationResult(
-                        page_number=original_index + 1,
-                        document_type=classification_result.get('document_type'),
-                        confidence=classification_result.get('confidence', 0.0)
-                    )
-        
-        else:  # Traitement séquentiel pour les petits documents
-            logger.info(f"Traitement séquentiel de {num_pages} page(s)...")
-            for i, image_np in enumerate(images_np):
-                ocr_lines = feature_extractor.extract_ocr(image_np)
-                ocr_data = {'ocr_lines': ocr_lines}
-                classification_result = document_classifier.predict(ocr_data)
-                
-                page_results_list[i] = PageClassificationResult(
-                    page_number=i + 1,
-                    document_type=classification_result.get('document_type'),
-                    confidence=classification_result.get('confidence', 0.0)
-                )
-        
-        processing_time = time.time() - start_time
-        
-        return MultiPageClassificationResponse(
-            status="success",
-            filename=file.filename,
-            total_pages=num_pages,
-            results_by_page=page_results_list,
-            processing_time=processing_time
+            message = process_page_task.send(image_identifier, page_index, document_id)
+        page_messages.append(message)
+    
+    # === ÉTAPE 4 : Créer la tâche de finalisation (Le Contremaître) ===
+    # Cette tâche s'exécutera avec un délai initial (eta) pour laisser le temps aux pages de se traiter
+    from src.workers import finalize_document_task
+    from datetime import datetime, timedelta
+    import time
+    
+    # Délai initial : 5 secondes pour laisser le temps aux premières pages de commencer
+    initial_delay_seconds = 5
+    # Convertir datetime en timestamp Unix (millisecondes) pour Dramatiq
+    eta_datetime = datetime.now() + timedelta(seconds=initial_delay_seconds)
+    eta_timestamp_ms = int(eta_datetime.timestamp() * 1000)  # Dramatiq attend des millisecondes
+    
+    if current_request_id:
+        finalize_message = finalize_document_task.send(
+            document_id,
+            filename,
+            num_pages,
+            options={
+                "eta": eta_timestamp_ms,
+                "message_metadata": {"request_id": current_request_id}
+            }
         )
+    else:
+        finalize_message = finalize_document_task.send(
+            document_id,
+            filename,
+            num_pages,
+            options={"eta": eta_timestamp_ms}
+        )
+    
+    # L'ID de la tâche de finalisation est notre task_id global
+    global_task_id = finalize_message.message_id
+    
+    # Log avant de retourner la réponse
+    logger.info(f"Tâche de finalisation créée avec task_id: {global_task_id}. Réponse 202 envoyée au client. document_id: {document_id}. request_id: {current_request_id}.")
+    
+    logger.info(
+        f"Tâche globale créée: {global_task_id} pour le document '{document_id}' ({num_pages} page(s))",
+        extra={
+            "metrics": {
+                "task_id": global_task_id,
+                "document_id": document_id,
+                "filename": filename,
+                "num_pages": num_pages,
+                "request_id": current_request_id
+            }
+        }
+    )
+
+    return TaskResponse(
+        task_id=global_task_id,
+        status="pending",
+        message="La tâche de classification a été créée. Vérifiez le statut avec l'endpoint de résultats."
+    )
+
+
+@router.get(
+    "/classify/results/{task_id}",
+    # Utilisez un modèle de réponse flexible
+    response_model=Dict[str, Any],
+    summary="Get classification task status and result",
+    description="""
+    Récupère le statut et le résultat d'une tâche de classification.
+    
+    **Response Status:**
+    - **pending:** Tâche créée mais pas encore terminée
+    - **completed:** Tâche terminée avec succès, résultats disponibles
+    - **failed:** Tâche échouée, message d'erreur disponible
+    
+    **Response Fields:**
+    - **task_id:** Identifiant de la tâche
+    - **status:** Statut actuel de la tâche
+    - **result:** Résultats de classification (si completed)
+    - **error:** Message d'erreur (si failed)
+    """
+)
+def get_classification_result(task_id: str):
+    """
+    Récupère le statut et le résultat d'une tâche de classification.
+    """
+    try:
+        # Récupérer le broker et trouver le middleware Results
+        # Utiliser finalize_document_task car c'est maintenant la tâche principale
+        from src.workers import finalize_document_task
+        broker = finalize_document_task.broker
+        results_middleware = None
         
+        # Chercher le middleware Results dans les middlewares du broker
+        for middleware in broker.middleware:
+            if isinstance(middleware, Results):
+                results_middleware = middleware
+                break
+        
+        if results_middleware is None:
+            return {"task_id": task_id, "status": "error", "error": "Backend de résultats non configuré"}
+        
+        # Créer un message avec le task_id
+        message = finalize_document_task.message().copy(message_id=task_id)
+        
+        # Obtenir le résultat depuis le backend (peut lever ResultMissing si pas encore prêt)
+        backend = results_middleware.backend
+        result = backend.get_result(message, block=False)
+        
+        return {
+            "task_id": task_id,
+            "status": "completed",
+            "result": result
+        }
+
+    except ResultMissing:
+        # ResultMissing signifie que le résultat n'est pas encore disponible
+        # Cela peut signifier soit que la tâche est en cours, soit qu'elle n'existe pas
+        # 
+        # IMPORTANT: On ne retourne 404 que si on peut confirmer avec CERTITUDE
+        # que la tâche n'existe vraiment nulle part. Sinon, on retourne "pending"
+        # pour éviter les faux négatifs (surtout si la tâche vient d'être créée
+        # et n'est pas encore complètement dans Redis).
+        try:
+            from dramatiq.brokers.redis import RedisBroker
+            from dramatiq.results.backends import RedisBackend
+            
+            if isinstance(broker, RedisBroker) and isinstance(backend, RedisBackend):
+                redis_client = broker.client
+                
+                # Vérifier toutes les clés Redis possibles qui pourraient contenir ce message_id
+                # 1. Résultat complet
+                result_key = f"dramatiq:results:{task_id}"
+                # 2. Résultat d'erreur
+                error_key = f"dramatiq:results:{task_id}:error"
+                
+                # Vérifier si une clé de résultat existe (même vide ou en erreur)
+                result_exists = redis_client.exists(result_key) or redis_client.exists(error_key)
+                
+                # Vérifier si le message existe dans les queues Dramatiq
+                # Dramatiq utilise le format: dramatiq:queue:{queue_name}
+                queue_name = classify_document_task.queue_name or "default"
+                full_queue_name = f"dramatiq:queue:{queue_name}"
+                
+                message_exists = False
+                try:
+                    # Vérifier si la queue existe et contient des messages
+                    queue_length = redis_client.llen(full_queue_name)
+                    if queue_length > 0:
+                        # Chercher le message dans la queue (vérifier les premiers messages)
+                        # On limite à 100 messages pour éviter de scanner toute la queue
+                        messages = redis_client.lrange(full_queue_name, 0, min(100, queue_length) - 1)
+                        for msg_data in messages:
+                            try:
+                                import json
+                                msg = json.loads(msg_data.decode('utf-8'))
+                                if msg.get('message_id') == task_id:
+                                    message_exists = True
+                                    break
+                            except:
+                                pass
+                except Exception:
+                    # Si on ne peut pas vérifier la queue, on assume que le message pourrait exister
+                    pass
+                
+                # Vérifier aussi dans la queue "default" au cas où
+                if not message_exists:
+                    try:
+                        default_queue_name = "dramatiq:queue:default"
+                        queue_length = redis_client.llen(default_queue_name)
+                        if queue_length > 0:
+                            messages = redis_client.lrange(default_queue_name, 0, min(100, queue_length) - 1)
+                            for msg_data in messages:
+                                try:
+                                    import json
+                                    msg = json.loads(msg_data.decode('utf-8'))
+                                    if msg.get('message_id') == task_id:
+                                        message_exists = True
+                                        break
+                                except:
+                                    pass
+                    except Exception:
+                        pass
+                
+                # On ne retourne 404 QUE si on peut confirmer avec certitude que:
+                # 1. Le résultat n'existe pas
+                # 2. Le message n'est pas dans les queues
+                # 3. ET que le message_id a un format valide (pour éviter les faux positifs)
+                # 
+                # Note: On ne vérifie PAS avec redis.keys() car:
+                # - C'est très lent sur de grandes bases
+                # - Peut être désactivé en production
+                # - Le message peut être en cours de traitement et ne pas être dans une queue
+                if not result_exists and not message_exists:
+                    # Vérifier que le task_id a un format UUID valide
+                    # Si ce n'est pas un UUID valide, c'est probablement une erreur
+                    import uuid
+                    try:
+                        uuid.UUID(task_id)
+                        # Format valide, mais message introuvable - retourner 404
+                        # MAIS seulement après un délai raisonnable (on ne vérifie pas ici)
+                        # Pour l'instant, on retourne "pending" pour être sûr
+                        # TODO: Implémenter un cache des task_ids créés récemment
+                    except ValueError:
+                        # Format invalide, retourner 404
+                        raise HTTPException(
+                            status_code=404,
+                            detail=f"Task {task_id} not found (invalid task_id format)"
+                        )
+        except HTTPException:
+            raise
+        except Exception:
+            # Si on ne peut pas vérifier (erreur de connexion Redis, etc.),
+            # on assume que la tâche est pending pour éviter les faux négatifs
+            # C'est le comportement le plus sûr
+            pass
+        
+        # Par défaut, si ResultMissing est levé, on retourne "pending"
+        # C'est le comportement le plus sûr car:
+        # 1. La tâche peut venir d'être créée et ne pas être encore dans Redis
+        # 2. La tâche peut être en cours de traitement et ne pas être dans une queue
+        # 3. Mieux vaut retourner "pending" que 404 pour une tâche qui existe
+        return {"task_id": task_id, "status": "pending"}
     except HTTPException:
         raise
-    except ValueError as e:
-        # Erreur de configuration (classification non activée, modèle non trouvé, etc.)
-        logger.error(f"Erreur de configuration pour la classification : {e}", exc_info=True)
-        raise HTTPException(
-            status_code=503,
-            detail=f"Service de classification non disponible : {str(e)}"
-        )
     except Exception as e:
-        logger.error(f"Erreur lors de la classification : {e}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Erreur interne du serveur : {str(e)}"
-        )
+        # Gérer le cas où la tâche a échoué (Dramatiq stocke l'exception)
+        try:
+            from src.workers import finalize_document_task
+            broker = finalize_document_task.broker
+            results_middleware = None
+            for middleware in broker.middleware:
+                if isinstance(middleware, Results):
+                    results_middleware = middleware
+                    break
+            
+            if results_middleware:
+                backend = results_middleware.backend
+                message = finalize_document_task.message().copy(message_id=task_id)
+                # Tenter de récupérer le résultat lèvera l'exception originale
+                backend.get_result(message)
+        except Exception as task_error:
+             return {"task_id": task_id, "status": "failed", "error": str(task_error)}
+        
+        # Fallback
+        return {"task_id": task_id, "status": "failed", "error": f"Erreur inconnue: {str(e)}"}
 
 
 @router.get(
@@ -991,4 +1170,527 @@ async def pipeline_status() -> StatusResponse:
         status="ready",
         stages=["preprocessing", "geometry", "colometry", "features"]
     )
+
+
+@router.post(
+    "/warmup",
+    response_model=WarmupResponse,
+    status_code=202,
+    summary="Warm-up Workers",
+    description="""
+    Envoie une tâche de "warm-up" aux workers pour pré-initialiser les modèles.
+    
+    Cette tâche force l'initialisation des modèles lourds (PaddleOCR, PyTorch, etc.)
+    dans les workers Dramatiq. C'est particulièrement utile en production avec
+    auto-scaling pour "chauffer" les nouveaux workers avant qu'ils ne reçoivent
+    de vraies tâches de traitement.
+    
+    **Use Cases:**
+    - Pré-initialiser les workers après un redémarrage
+    - "Chauffer" les nouveaux workers dans un environnement auto-scaling
+    - Vérifier que les workers sont prêts à traiter des tâches
+    
+    **How it works:**
+    - Envoie une tâche légère qui ne fait rien d'utile mais force l'initialisation
+    - Les modèles sont chargés en mémoire dans le processus worker
+    - Les futures tâches de traitement seront plus rapides car les modèles sont déjà chargés
+    
+    **Query Parameters:**
+    - **count** (optional, default: 1): Nombre de tâches de warm-up à envoyer.
+      Utile pour chauffer plusieurs workers en parallèle.
+    
+    **Response:**
+    - Returns 202 Accepted avec le nombre de tâches envoyées
+    - Les tâches sont traitées de manière asynchrone
+    - Aucun résultat n'est retourné (les tâches ne stockent pas de résultats)
+    
+    **Note:** Cette tâche est légère et ne consomme pas de ressources significatives.
+    Elle peut être appelée régulièrement sans impact sur les performances.
+    """
+)
+async def warmup_workers(count: int = 1) -> WarmupResponse:
+    """
+    Envoie une ou plusieurs tâches de warm-up aux workers pour pré-initialiser les modèles.
+    
+    Args:
+        count: Nombre de tâches de warm-up à envoyer (défaut: 1)
+    
+    Returns:
+        WarmupResponse: Statut et nombre de tâches envoyées
+    """
+    if count < 1:
+        raise HTTPException(
+            status_code=400,
+            detail="Le nombre de tâches doit être supérieur ou égal à 1"
+        )
+    
+    if count > 100:
+        raise HTTPException(
+            status_code=400,
+            detail="Le nombre de tâches ne peut pas dépasser 100 pour éviter la surcharge"
+        )
+    
+    # Récupérer le request_id pour le propager dans les métadonnées des tâches
+    current_request_id = get_request_id()
+    
+    # Envoyer les tâches de warm-up
+    # Propager le request_id dans les métadonnées pour le traçage de bout en bout
+    tasks_sent = 0
+    for _ in range(count):
+        try:
+            if current_request_id:
+                warmup_worker_task.send(
+                    options={"message_metadata": {"request_id": current_request_id}}
+                )
+            else:
+                warmup_worker_task.send()
+            tasks_sent += 1
+        except Exception as e:
+            logger.error(f"Erreur lors de l'envoi d'une tâche de warm-up: {e}", exc_info=True)
+            # Continuer à envoyer les autres tâches même si une échoue
+    
+    logger.info(
+        f"Tâches de warm-up envoyées: {tasks_sent}/{count}",
+        extra={
+            "metrics": {
+                "warmup_tasks_requested": count,
+                "warmup_tasks_sent": tasks_sent,
+                "status": "sent"
+            }
+        }
+    )
+    
+    if tasks_sent == 0:
+        raise HTTPException(
+            status_code=500,
+            detail="Impossible d'envoyer les tâches de warm-up"
+        )
+    
+    message = f"{tasks_sent} tâche(s) de warm-up envoyée(s) aux workers"
+    if tasks_sent < count:
+        message += f" ({count - tasks_sent} échec(s))"
+    
+    return WarmupResponse(
+        status="sent",
+        message=message,
+        task_count=tasks_sent
+    )
+
+
+@router.get(
+    "/ocr/health",
+    response_model=OCRHealthResponse,
+    summary="OCR Service Health Check",
+    description=""""
+    Vérifie la santé du microservice OCR et s'assure que le moteur PaddleOCR est initialisé.
+    
+    Cet endpoint envoie une tâche de warm-up au microservice OCR et attend le résultat
+    pour valider que le service est opérationnel. Si le service répond dans le délai
+    imparti et que le moteur OCR est initialisé, le service est considéré comme sain.
+    
+    **Use Cases:**
+    - Vérifier que le microservice OCR est démarré et prêt
+    - Valider que les modèles PaddleOCR sont chargés
+    - Monitoring de la santé du service OCR
+    - Health checks pour les load balancers ou orchestrateurs
+    
+    **How it works:**
+    - Envoie une tâche de warm-up au microservice OCR via la queue ocr-queue
+    - Attend le résultat avec un timeout de 30 secondes
+    - Vérifie que le moteur OCR est initialisé (engine_initialized: true)
+    - Retourne le statut de santé du service
+    
+    **Response:**
+    - **status**: "healthy" si le service répond et que le moteur est initialisé, "unhealthy" sinon
+    - **engine_initialized**: True si le moteur PaddleOCR est initialisé
+    - **worker_pid**: Process ID du worker qui a répondu
+    - **response_time_ms**: Temps de réponse en millisecondes
+    - **message**: Message décrivant le résultat du health check
+    
+    **Error Handling:**
+    - Retourne 503 Service Unavailable si le service OCR ne répond pas
+    - Retourne 500 si une erreur inattendue se produit
+    
+    **Note:** Cet endpoint est bloquant et attend la réponse du microservice.
+    Il peut être utilisé pour des health checks mais ne doit pas être appelé
+    trop fréquemment pour éviter de surcharger le service.
+    """
+)
+async def ocr_health_check() -> OCRHealthResponse:
+    """
+    Vérifie la santé du microservice OCR.
+    
+    Envoie une tâche de warm-up et attend le résultat pour valider
+    que le service est opérationnel.
+    
+    Returns:
+        OCRHealthResponse: Statut de santé du service OCR
+    """
+    start_time = time.time()
+    
+    try:
+        # Envoyer une tâche de warm-up au microservice OCR
+        message = warmup_ocr_worker.send()
+        
+        # Attendre le résultat avec un timeout
+        try:
+            # Timeout de 30 secondes pour le health check
+            result = message.get_result(block=True, timeout=30000)
+            response_time_ms = (time.time() - start_time) * 1000
+            
+            # Vérifier le résultat
+            if result and result.get('status') == 'ready' and result.get('engine_initialized', False):
+                logger.info(
+                    f"Health check OCR réussi (PID: {result.get('worker_pid')}, temps: {response_time_ms:.2f}ms)",
+                    extra={
+                        "metrics": {
+                            "status": "healthy",
+                            "worker_pid": result.get('worker_pid'),
+                            "response_time_ms": round(response_time_ms, 2)
+                        }
+                    }
+                )
+                return OCRHealthResponse(
+                    status="healthy",
+                    engine_initialized=True,
+                    worker_pid=result.get('worker_pid'),
+                    message="Le microservice OCR est opérationnel et le moteur PaddleOCR est initialisé",
+                    response_time_ms=round(response_time_ms, 2)
+                )
+            else:
+                # Le service a répondu mais le moteur n'est pas initialisé
+                logger.warning(
+                    f"Health check OCR: service répond mais moteur non initialisé",
+                    extra={
+                        "metrics": {
+                            "status": "unhealthy",
+                            "engine_initialized": result.get('engine_initialized', False) if result else False
+                        }
+                    }
+                )
+                return OCRHealthResponse(
+                    status="unhealthy",
+                    engine_initialized=result.get('engine_initialized', False) if result else False,
+                    worker_pid=result.get('worker_pid') if result else None,
+                    message="Le microservice OCR répond mais le moteur PaddleOCR n'est pas initialisé",
+                    response_time_ms=round(response_time_ms, 2)
+                )
+                
+        except ResultTimeout:
+            response_time_ms = (time.time() - start_time) * 1000
+            logger.error(
+                f"Health check OCR: timeout après {response_time_ms:.2f}ms",
+                extra={
+                    "metrics": {
+                        "status": "unhealthy",
+                        "error": "timeout",
+                        "response_time_ms": round(response_time_ms, 2)
+                    }
+                }
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=f"Le microservice OCR n'a pas répondu dans le délai imparti (timeout: 30s)"
+            )
+        except Exception as e:
+            response_time_ms = (time.time() - start_time) * 1000
+            logger.error(
+                f"Health check OCR: erreur lors de la récupération du résultat: {e}",
+                exc_info=True,
+                extra={
+                    "metrics": {
+                        "status": "unhealthy",
+                        "error": str(e),
+                        "response_time_ms": round(response_time_ms, 2)
+                    }
+                }
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=f"Erreur lors de la communication avec le microservice OCR: {str(e)}"
+            )
+            
+    except Exception as e:
+        response_time_ms = (time.time() - start_time) * 1000
+        logger.error(
+            f"Health check OCR: erreur lors de l'envoi de la tâche: {e}",
+            exc_info=True,
+            extra={
+                "metrics": {
+                    "status": "unhealthy",
+                    "error": str(e),
+                    "response_time_ms": round(response_time_ms, 2)
+                }
+            }
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=f"Impossible de communiquer avec le microservice OCR: {str(e)}"
+        )
+
+
+# ==========================================
+# Dead Letter Queue (DLQ) Management
+# ==========================================
+
+class DLQMessage(BaseModel):
+    """Modèle pour un message de la DLQ"""
+    message_id: str = Field(..., description="ID unique du message")
+    actor_name: str = Field(..., description="Nom de l'actor Dramatiq")
+    args: List[Any] = Field(default_factory=list, description="Arguments du message")
+    kwargs: Dict[str, Any] = Field(default_factory=dict, description="Arguments nommés du message")
+    queue_name: str = Field(..., description="Nom de la queue")
+    retries: int = Field(..., description="Nombre de tentatives effectuées")
+    max_retries: int = Field(..., description="Nombre maximum de tentatives")
+    timestamp: Optional[int] = Field(None, description="Timestamp du message")
+
+
+class DLQListResponse(BaseModel):
+    """Réponse pour la liste des messages DLQ"""
+    total: int = Field(..., description="Nombre total de messages dans la DLQ")
+    messages: List[DLQMessage] = Field(..., description="Liste des messages")
+    limit: int = Field(..., description="Limite appliquée à la requête")
+
+
+class DLQStatisticsResponse(BaseModel):
+    """Statistiques sur la DLQ"""
+    total_messages: int = Field(..., description="Nombre total de messages")
+    by_actor: Dict[str, int] = Field(..., description="Répartition par actor")
+    oldest_message: Optional[int] = Field(None, description="Timestamp du message le plus ancien")
+    newest_message: Optional[int] = Field(None, description="Timestamp du message le plus récent")
+
+
+class DLQReplayResponse(BaseModel):
+    """Réponse pour le rejeu d'un message"""
+    success: bool = Field(..., description="True si le message a été rejoué avec succès")
+    message_id: str = Field(..., description="ID du message rejoué")
+    message: str = Field(..., description="Message de statut")
+
+
+@router.get(
+    "/dlq/messages",
+    response_model=DLQListResponse,
+    summary="List Dead Letter Queue Messages",
+    description="""
+    Liste les messages dans la Dead Letter Queue (DLQ).
+    
+    Les messages dans la DLQ sont des tâches qui ont échoué après avoir atteint
+    leur nombre maximum de tentatives (max_retries). Ces messages peuvent être
+    analysés pour comprendre les erreurs et potentiellement rejoués.
+    
+    **Use Cases:**
+    - Inspecter les tâches échouées pour debugging
+    - Identifier les patterns d'erreurs récurrents
+    - Préparer le rejeu de messages après correction d'un bug
+    
+    **Query Parameters:**
+    - **limit** (optional, default: 100): Nombre maximum de messages à retourner
+    
+    **Response:**
+    - **total**: Nombre total de messages dans la DLQ
+    - **messages**: Liste des messages avec leurs métadonnées
+    - **limit**: Limite appliquée à la requête
+    """
+)
+async def list_dlq_messages(limit: int = 100) -> DLQListResponse:
+    """
+    Liste les messages dans la Dead Letter Queue.
+    """
+    from src.utils.dlq_manager import DLQManager
+    
+    try:
+        dlq_manager = DLQManager()
+        total = dlq_manager.get_dlq_length()
+        messages_data = dlq_manager.list_messages(limit=limit)
+        
+        messages = [
+            DLQMessage(
+                message_id=msg['message_id'],
+                actor_name=msg['actor_name'],
+                args=msg.get('args', []),
+                kwargs=msg.get('kwargs', {}),
+                queue_name=msg.get('queue_name', 'default'),
+                retries=msg.get('retries', 0),
+                max_retries=msg.get('max_retries', 0),
+                timestamp=msg.get('timestamp')
+            )
+            for msg in messages_data
+        ]
+        
+        return DLQListResponse(
+            total=total,
+            messages=messages,
+            limit=limit
+        )
+    except Exception as e:
+        logger.error(f"Erreur lors de la récupération des messages DLQ: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la récupération des messages DLQ: {str(e)}")
+
+
+@router.get(
+    "/dlq/statistics",
+    response_model=DLQStatisticsResponse,
+    summary="Get DLQ Statistics",
+    description="""
+    Retourne des statistiques sur la Dead Letter Queue.
+    
+    **Use Cases:**
+    - Monitoring de la santé du système
+    - Identification des actors qui échouent le plus souvent
+    - Décision sur la nécessité d'intervention
+    
+    **Response:**
+    - **total_messages**: Nombre total de messages dans la DLQ
+    - **by_actor**: Répartition des messages par actor
+    - **oldest_message**: Timestamp du message le plus ancien
+    - **newest_message**: Timestamp du message le plus récent
+    """
+)
+async def get_dlq_statistics() -> DLQStatisticsResponse:
+    """
+    Retourne des statistiques sur la DLQ.
+    """
+    from src.utils.dlq_manager import DLQManager
+    
+    try:
+        dlq_manager = DLQManager()
+        stats = dlq_manager.get_statistics()
+        
+        return DLQStatisticsResponse(
+            total_messages=stats['total_messages'],
+            by_actor=stats['by_actor'],
+            oldest_message=stats.get('oldest_message'),
+            newest_message=stats.get('newest_message')
+        )
+    except Exception as e:
+        logger.error(f"Erreur lors de la récupération des statistiques DLQ: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la récupération des statistiques DLQ: {str(e)}")
+
+
+@router.post(
+    "/dlq/replay/{message_id}",
+    response_model=DLQReplayResponse,
+    summary="Replay a DLQ Message",
+    description="""
+    Rejoue un message depuis la Dead Letter Queue.
+    
+    Le message est retiré de la DLQ et renvoyé dans la queue normale pour être
+    traité à nouveau. Le compteur de retries est réinitialisé.
+    
+    **Use Cases:**
+    - Rejouer une tâche après correction d'un bug
+    - Réessayer une tâche qui a échoué à cause d'une erreur temporaire
+    
+    **Path Parameters:**
+    - **message_id**: ID du message à rejouer
+    
+    **Response:**
+    - **success**: True si le message a été rejoué avec succès
+    - **message_id**: ID du message rejoué
+    - **message**: Message de statut
+    """
+)
+async def replay_dlq_message(message_id: str) -> DLQReplayResponse:
+    """
+    Rejoue un message depuis la DLQ.
+    """
+    from src.utils.dlq_manager import DLQManager
+    
+    try:
+        dlq_manager = DLQManager()
+        success = dlq_manager.replay_message(message_id)
+        
+        if success:
+            return DLQReplayResponse(
+                success=True,
+                message_id=message_id,
+                message=f"Message {message_id} rejoué avec succès"
+            )
+        else:
+            return DLQReplayResponse(
+                success=False,
+                message_id=message_id,
+                message=f"Impossible de rejouer le message {message_id}. Vérifiez qu'il existe dans la DLQ."
+            )
+    except Exception as e:
+        logger.error(f"Erreur lors du rejeu du message {message_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erreur lors du rejeu du message: {str(e)}")
+
+
+@router.delete(
+    "/dlq/messages/{message_id}",
+    summary="Delete a DLQ Message",
+    description="""
+    Supprime définitivement un message de la Dead Letter Queue.
+    
+    **Use Cases:**
+    - Supprimer des messages obsolètes ou non pertinents
+    - Nettoyer la DLQ après analyse
+    
+    **Path Parameters:**
+    - **message_id**: ID du message à supprimer
+    
+    **Response:**
+    - Message de confirmation
+    """
+)
+async def delete_dlq_message(message_id: str):
+    """
+    Supprime un message de la DLQ.
+    """
+    from src.utils.dlq_manager import DLQManager
+    
+    try:
+        dlq_manager = DLQManager()
+        success = dlq_manager.delete_message(message_id)
+        
+        if success:
+            return {"success": True, "message": f"Message {message_id} supprimé de la DLQ"}
+        else:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Message {message_id} non trouvé dans la DLQ"
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur lors de la suppression du message {message_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la suppression du message: {str(e)}")
+
+
+@router.delete(
+    "/dlq/clear",
+    summary="Clear Dead Letter Queue",
+    description="""
+    Vide complètement la Dead Letter Queue.
+    
+    ⚠️ **Attention**: Cette opération est irréversible. Tous les messages de la DLQ
+    seront supprimés définitivement.
+    
+    **Use Cases:**
+    - Nettoyer la DLQ après résolution d'un problème systémique
+    - Réinitialiser la DLQ dans un environnement de test
+    
+    **Response:**
+    - Nombre de messages supprimés
+    """
+)
+async def clear_dlq():
+    """
+    Vide complètement la DLQ.
+    """
+    from src.utils.dlq_manager import DLQManager
+    
+    try:
+        dlq_manager = DLQManager()
+        deleted_count = dlq_manager.clear_dlq()
+        
+        return {
+            "success": True,
+            "message": f"DLQ vidée: {deleted_count} message(s) supprimé(s)",
+            "deleted_count": deleted_count
+        }
+    except Exception as e:
+        logger.error(f"Erreur lors du vidage de la DLQ: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erreur lors du vidage de la DLQ: {str(e)}")
 

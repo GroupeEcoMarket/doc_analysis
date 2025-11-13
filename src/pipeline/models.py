@@ -227,6 +227,14 @@ class CheckboxDetection(BaseModel):
     confidence: float = Field(..., ge=0.0, le=1.0, description="Confiance de la détection (0.0-1.0)")
 
 
+class PageClassificationResult(BaseModel):
+    """Résultat de classification pour une seule page."""
+    page_number: int = Field(..., description="Numéro de page (1-indexed)")
+    document_type: Optional[str] = Field(None, description="Type de document détecté")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Confiance de la classification (0.0-1.0)")
+    error: Optional[str] = Field(None, description="Message d'erreur si le traitement a échoué")
+
+
 class FeaturesOutput(BaseModel):
     """
     Résultat de l'étape d'extraction de features.

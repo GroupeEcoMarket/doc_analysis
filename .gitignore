@@ -1,73 +1,77 @@
-# Python
+# ===================================================================
+# Fichiers d'environnement et secrets
+# NE JAMAIS VERSIONNER CES FICHIERS
+# ===================================================================
+.env
+.env.*
+!.env.example
+
+# ===================================================================
+# Python - Cache, builds et environnements virtuels
+# ===================================================================
 __pycache__/
 *.py[cod]
-*$py.class
 *.so
 .Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
 
-# Virtual Environment
+# Environnements virtuels
 venv/
+.venv/
 ENV/
 env/
-.venv
 
-# IDE
+# Artéfacts de build (pip, poetry)
+build/
+dist/
+*.egg-info/
+
+# ===================================================================
+# IDE et fichiers système
+# ===================================================================
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+.DS_Store
+Thumbs.db
 
-# Environment variables
-.env
-.env.local
+# ===================================================================
+# Données, Modèles, Logs et Artéfacts (NON VERSIONNÉS)
+# On ignore le contenu des dossiers, mais on garde la structure via .gitkeep
+# ===================================================================
+# Données d'entrée, de sortie et temporaires
+/data/*
+!/data/.gitkeep
+!/data/input/.gitkeep
+!/data/output/.gitkeep
+!/data/processed/.gitkeep
+!/data/temp_storage/.gitkeep
 
-# Data files (optionnel - à adapter selon vos besoins)
-data/input/*
-data/processed/*
-data/output/*
-!data/input/.gitkeep
-!data/processed/.gitkeep
-!data/output/.gitkeep
+# Modèles Machine Learning (souvent volumineux)
+/models/*
+!/models/.gitkeep
 
-# Fichiers et répertoires générés par les tests et le coverage
+# Données d'entraînement et artéfacts
+/training_data/*
+!/training_data/raw/.gitkeep
+!/training_data/processed/.gitkeep
+!/training_data/artifacts/.gitkeep
+
+# Fichiers de log et de verrouillage (runtime)
+/logs/
+*.log
+**/.locks/
+
+# ===================================================================
+# Rapports et Fichiers Générés
+# ===================================================================
+# Rapports de test et de couverture
 .coverage
 htmlcov/
 .pytest_cache/
 
-# Logs
-*.log
-logs/
+# Rapports de QA et autres fichiers générés
 qa_report.html
-digest.txt
 meta.json
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Models (si trop volumineux)
-models/*.pth
-models/*.pt
-models/*.h5
-!models/.gitkeep
-
-# Training data
-training_data/
-
-
+digest.txt

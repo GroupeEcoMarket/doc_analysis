@@ -3,13 +3,12 @@ Configuration du logging structuré pour l'application
 """
 
 import logging
-import os
 import sys
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 from contextvars import ContextVar
 from typing import Optional
-from dotenv import load_dotenv
+from src.config.manager import get_config_manager
 
 # Context variable pour stocker le request_id dans le contexte de chaque requête
 request_id_context: ContextVar[Optional[str]] = ContextVar('request_id', default=None)
@@ -19,28 +18,24 @@ def setup_logging():
     """
     Configure le système de logging de l'application.
     
-    Le niveau de log et le fichier de log sont configurés via les variables d'environnement:
-    - LOG_LEVEL: Niveau de log (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-    - LOG_FILE: Chemin vers le fichier de log (optionnel)
+    Le niveau de log et le fichier de log sont configurés via la configuration:
+    - env.logging.level: Niveau de log (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+    - env.logging.file: Chemin vers le fichier de log (optionnel)
     
-    Si LOG_FILE n'est pas défini, les logs ne sont écrits que dans la console.
+    Si env.logging.file n'est pas défini, les logs ne sont écrits que dans la console.
     """
-    # Charger les variables d'environnement
-    env_path = Path(__file__).parent.parent.parent / ".env"
-    if env_path.exists():
-        load_dotenv(env_path)
-    else:
-        load_dotenv()
-    
-    # Récupérer la configuration depuis les variables d'environnement
-    log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
-    log_file = os.getenv("LOG_FILE", None)
+    # Récupérer la configuration depuis ConfigManager
+    config = get_config_manager()
+    log_level_str = config.get("env", "logging", "level", default="INFO").upper()
+    log_file = config.get("env", "logging", "file", default=None)
     
     # Convertir le niveau de log en constante logging
     log_level = getattr(logging, log_level_str, logging.INFO)
     
-    # Format standard pour les logs avec request_id
-    log_format = "%(asctime)s - %(name)s - %(levelname)s - [request_id=%(request_id)s] - %(message)s"
+    # Format standard pour les logs avec request_id, thread ID et process ID
+    # Le PID est particulièrement utile pour déboguer les workers Dramatiq multiprocessing
+    # Format amélioré avec millisecondes pour plus de précision
+    log_format = "%(asctime)s.%(msecs)03d | %(levelname)-8s | %(name)-30s | [request_id=%(request_id)s] [thread=%(thread)d] [pid=%(process)d] | %(message)s"
     date_format = "%Y-%m-%d %H:%M:%S"
     
     # Configuration du formatter personnalisé

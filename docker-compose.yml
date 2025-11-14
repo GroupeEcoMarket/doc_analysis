@@ -42,7 +42,7 @@ services:
       - OCR_WORKER_PROCESSES=1
       - OCR_WORKER_THREADS=1
       - OCR_STORAGE_DIR=/app/data/temp_storage
-    command: ["./run_worker.sh"]
+    command: ["sh", "./run_worker.sh"]
     restart: always
     healthcheck:
       test: ["CMD", "python", "healthcheck.py"]
